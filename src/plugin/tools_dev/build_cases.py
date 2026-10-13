@@ -3,11 +3,14 @@
     uv run python src/plugin/tools_dev/build_cases.py
 
 Each case is what ~/mochi-dev/harness/scripted_task.py runs: the task's arguments, the scripted
-agent's steps (list_cities, one get_daily with every city, report_alerts: the 4-step path Mochi's
-6-step cap leaves room for; batched_daily reads the cities in two calls) and the expected verdict.
-The gold cases report exactly what the rules give; each wrong case breaks the gold report in one
-way the plan lists as adversarial. The verdict every case expects is checked here with the real
-verifier before the case is written.
+agent's steps and the expected verdict. The prescribed path is get_daily once with all 30 cities,
+then report_alerts three times with 10 examined cities each (so a hosted model converts 10 cities
+per step, inside its 2,048-token reply cap), then the answer: 4 tool calls of Mochi's 6 steps.
+gold does it in one report_alerts call, gold_chunked in three, batched_daily reads the cities in
+two get_daily calls after list_cities, corrected fixes an earlier chunk's mistakes in a later call,
+and unexamined stops after two chunks. Each wrong case breaks the gold report in one way the plan
+lists as adversarial. Every expected verdict is checked here with the real verifier, the report
+steps applied through report_alerts itself, before the case is written.
 """
 
 from __future__ import annotations
@@ -27,8 +30,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from slimconfig import build_output, plain_output
 
 import verifier
-from contract import AlertInput, HourlyInput, PinOutput
-from plugin.alerts import get_hourly, pin_alerts
+from contract import AlertInput, HourlyInput, PinOutput, ReportInput
+from plugin.alerts import get_hourly, pin_alerts, report_alerts
 from plugin.data import snapshot
 from plugin.rules import (
     MAX_CITIES_PER_CALL,
@@ -41,40 +44,63 @@ from plugin.rules import (
     plain_report,
     round_half_up,
 )
-from verifier.pin import expected_of
+from verifier.pin import expected_of, metrics_of
 
 CASES = ROOT / "tests" / "cases"
 TASK = "daily-alert"
 DST_DATE = "2026-09-06"  # Santiago's 23-hour day
+CHUNKS = 3  # report_alerts calls on the prescribed path
+
+
+def names() -> list[str]:
+    return [city.name for city in snapshot().cities]
 
 
 def pin(arguments: dict) -> PinOutput:
     return pin_alerts(build_output(arguments, AlertInput), Path(tempfile.mkdtemp()))
 
 
-def verdict(arguments: dict, pinned: PinOutput, report: dict | None) -> dict:
-    """The real verifier's verdict on ``report`` (None: no report written)."""
-    workspace = Path(tempfile.mkdtemp())
-    if report is not None:
-        (workspace / "weather-alert").mkdir()
-        (workspace / "weather-alert" / f"{arguments['date']}.json").write_text(json.dumps(report))
-    return verifier.verify_task(
-        TASK, build_output(arguments, AlertInput), build_output(plain_output(pinned), PinOutput), str(workspace)
-    )
+def chunk_report(report: dict, cities: list[str]) -> dict:
+    """The part of a full report that judges ``cities``: one report_alerts call."""
+    covered = set(cities)
+    return {
+        "date": report["date"],
+        "examined": list(cities),
+        "alerts": [entry for entry in report["alerts"] if entry["city"] in covered],
+        "unavailable": [entry for entry in report["unavailable"] if entry["city"] in covered],
+    }
 
 
-def steps(arguments: dict, report: dict | None, batch: int = MAX_CITIES_PER_CALL) -> list[dict]:
-    names = [city.name for city in snapshot().cities]
-    found = [{"tool": "list_cities", "arguments": {"date": arguments["date"]}, "save_as": "cities"}]
-    for start in range(0, len(names), batch):
-        found.append({"tool": "get_daily", "arguments": {"cities": names[start : start + batch], "date": arguments["date"]}})
-    if report is not None:
-        found.append({"tool": "report_alerts", "arguments": report})
+def report_steps(report: dict | None, chunks: int = 1) -> list[dict]:
+    """The report_alerts calls that write ``report``: one call, or ``chunks`` calls over its examined cities."""
+    if report is None:
+        return []
+    if chunks == 1:
+        return [{"tool": "report_alerts", "arguments": report}]
+    examined = report["examined"]
+    size = -(-len(examined) // chunks)
+    return [{"tool": "report_alerts", "arguments": chunk_report(report, examined[start : start + size])} for start in range(0, len(examined), size)]
+
+
+def read_steps(date: str, batch: int = MAX_CITIES_PER_CALL, list_first: bool = False) -> list[dict]:
+    found = [{"tool": "list_cities", "arguments": {"date": date}, "save_as": "cities"}] if list_first else []
+    everyone = names()
+    for start in range(0, len(everyone), batch):
+        found.append({"tool": "get_daily", "arguments": {"cities": everyone[start : start + batch], "date": date}})
     return found
 
 
-def write_case(name: str, note: str, arguments: dict, pinned: PinOutput, report: dict | None, *, expect: dict, answer: str, extra_steps: list | None = None, batch: int = MAX_CITIES_PER_CALL) -> None:
-    found = verdict(arguments, pinned, report)
+def verdict(arguments: dict, pinned: PinOutput, steps: list[dict]) -> dict:
+    """The real verifier's verdict after the report steps are applied through report_alerts itself."""
+    workspace = Path(tempfile.mkdtemp())
+    for step in steps:
+        if step.get("tool") == "report_alerts" and not step.get("expect_error"):
+            report_alerts(build_output(step["arguments"], ReportInput), workspace)
+    return verifier.verify_task(TASK, build_output(arguments, AlertInput), build_output(plain_output(pinned), PinOutput), str(workspace))
+
+
+def write_case(name: str, note: str, arguments: dict, pinned: PinOutput, steps: list[dict], *, expect: dict, answer: str) -> None:
+    found = verdict(arguments, pinned, steps)
     if found["valid"] != expect["valid"]:
         raise RuntimeError(f"{name}: the verifier says valid={found['valid']}, the case expects {expect['valid']}: {found['message']}")
     if "message_contains" in expect and expect["message_contains"] not in found["message"]:
@@ -83,16 +109,10 @@ def write_case(name: str, note: str, arguments: dict, pinned: PinOutput, report:
         raise RuntimeError(f"{name}: score {found['score']} below {expect['score_min']}")
     if "score_max" in expect and found["score"] > expect["score_max"]:
         raise RuntimeError(f"{name}: score {found['score']} above {expect['score_max']}")
-    case = {
-        "note": note,
-        "task": TASK,
-        "arguments": arguments,
-        "steps": steps(arguments, report, batch) + (extra_steps or []),
-        "answer": answer,
-        "expect": expect,
-    }
+    case = {"note": note, "task": TASK, "arguments": arguments, "steps": steps, "answer": answer, "expect": expect}
     (CASES / f"{name}.json").write_text(json.dumps(case, indent=2) + "\n", encoding="utf-8")
-    print(f"{name:18} valid={found['valid']!s:5} score={found['score']:.3f}  {found['message'][:110]}")
+    calls = sum(1 for step in steps if "tool" in step)
+    print(f"{name:18} {calls} tool calls  valid={found['valid']!s:5} score={found['score']:.3f}  {found['message'][:100]}")
 
 
 def summary(report: dict) -> str:
@@ -128,8 +148,7 @@ def find_gold() -> tuple[dict, PinOutput, str, str]:
     while day.strftime("%Y-%m-%d") <= data.end:
         date = day.strftime("%Y-%m-%d")
         pinned = pin({**probe, "date": date})
-        ties = [row for row in pinned.metric if humidity_tie(row)]
-        for tie in ties:
+        for tie in [row for row in pinned.metric if humidity_tie(row)]:
             mean = Fraction(int(tie.humidity_sum_pct), 24)
             # The humidity rule that the tie city satisfies; its threshold is a round number below the mean.
             threshold = (mean.numerator // mean.denominator) // 5 * 5
@@ -139,11 +158,7 @@ def find_gold() -> tuple[dict, PinOutput, str, str]:
                 exact = fahrenheit_boundary(boundary)
                 if exact is None or boundary.city == tie.city or exact < 80:
                     continue
-                arguments = {
-                    **probe,
-                    "date": date,
-                    "conditions": [f"max_temp >= {exact}", f"humidity >= {threshold}", "rain > 0.5", "wind >= 20"],
-                }
+                arguments = {**probe, "date": date, "conditions": [f"max_temp >= {exact}", f"humidity >= {threshold}", "rain > 0.5", "wind >= 20"]}
                 expected = expected_of(build_output(arguments, AlertInput), pinned)
                 cities = {alert.city: alert for alert in expected.alerts}
                 # The boundary city must be an alert through its high alone, so excluding it is the ">" mistake.
@@ -169,21 +184,58 @@ def utc_day_metrics(city: str, date: str):
     return aggregate(city, rows)
 
 
+def rounded(variable: str, metric, units: Units) -> float:
+    exact = convert(variable, exact_metric(metric, variable), units)
+    return float(round_half_up(exact))
+
+
 def main() -> int:
     CASES.mkdir(parents=True, exist_ok=True)
     for stale in CASES.glob("*.json"):
         stale.unlink()
 
-    # ----- The rich gold case: a rounding tie, a boundary city, mixed rules -----
+    # ----- The rich gold day: a rounding tie, a boundary city, mixed rules -----
     arguments, pinned, tie_city, boundary_city = find_gold()
+    date = arguments["date"]
     units = Units("F", "mph", "in")
     expected = expected_of(build_output(arguments, AlertInput), pinned)
-    gold = plain_report(arguments["date"], expected)
-    print(f"gold day {arguments['date']}: rules {arguments['conditions']}; tie city {tie_city}; boundary city {boundary_city}; {len(gold['alerts'])} alerts")
-    write_case("gold", f"The exact report for {arguments['date']}: {tie_city}'s humidity is a rounding tie (half up), {boundary_city}'s high sits exactly on its threshold.",
-               arguments, pinned, gold, expect={"valid": True, "score_min": 1.0}, answer=summary(gold))
-    write_case("batched_daily", "The exact report, with the cities read in two get_daily calls of 15 instead of one.",
-               arguments, pinned, gold, expect={"valid": True, "score_min": 1.0}, answer=summary(gold), batch=15)
+    gold = plain_report(date, expected)
+    read = read_steps(date)
+    print(f"gold day {date}: rules {arguments['conditions']}; tie city {tie_city}; boundary city {boundary_city}; {len(gold['alerts'])} alerts")
+    valid = {"valid": True, "score_min": 1.0}
+    write_case("gold", f"The exact report for {date} in one report_alerts call: {tie_city}'s humidity is a rounding tie (half up), {boundary_city}'s high sits exactly on its threshold.",
+               arguments, pinned, read + report_steps(gold), expect=valid, answer=summary(gold))
+    write_case("gold_chunked", "The prescribed path: get_daily with all 30 cities, then three report_alerts calls of 10 examined cities each.",
+               arguments, pinned, read + report_steps(gold, CHUNKS), expect=valid, answer=summary(gold))
+    write_case("batched_daily", "The exact report after list_cities and two get_daily calls of 15 instead of one.",
+               arguments, pinned, read_steps(date, batch=15, list_first=True) + report_steps(gold), expect=valid, answer=summary(gold))
+
+    chunks = report_steps(gold, CHUNKS)
+    write_case("unexamined", "Only two of the three report_alerts calls: ten cities are never examined.",
+               arguments, pinned, read + chunks[:2], expect={"valid": False, "message_contains": "unexamined", "score_max": 0.7}, answer=summary(gold))
+
+    # corrected: the first chunk gets one value wrong and alerts a city that does not qualify; the last
+    # chunk examines both again, with the right values for one and no entry for the other
+    first = chunks[0]["arguments"]
+    alerted = {entry["city"] for entry in gold["alerts"]}
+    wrong_city = next(entry["city"] for entry in first["alerts"])
+    bogus_city = next(city for city in first["examined"] if city not in alerted and city not in {u["city"] for u in gold["unavailable"]})
+    broken = json.loads(json.dumps(chunks))
+    for entry in broken[0]["arguments"]["alerts"]:
+        if entry["city"] == wrong_city:
+            key = next(iter(entry["values"]))
+            entry["values"][key] = round(entry["values"][key] + 0.1, 1)
+    spare_row = next(row for row in pinned.metric if row.city == bogus_city)
+    spare_metric = metrics_of(pinned)[[row.city for row in pinned.metric].index(bogus_city)]
+    conditions = parse_conditions(arguments["conditions"])
+    bogus_values = {variable: rounded(variable, spare_metric, units) for variable in dict.fromkeys(c.variable for c in conditions)}
+    broken[0]["arguments"]["alerts"].append({"city": bogus_city, "values": bogus_values, "matched": [arguments["conditions"][1]]})
+    last = broken[-1]["arguments"]
+    last["examined"] = last["examined"] + [wrong_city, bogus_city]
+    last["alerts"] = last["alerts"] + [entry for entry in gold["alerts"] if entry["city"] == wrong_city]
+    write_case("corrected", f"The first call gets {wrong_city}'s value wrong and alerts {bogus_city}, which does not qualify; the last call examines both again with {wrong_city} corrected and no entry for {bogus_city}: the final file wins.",
+               arguments, pinned, read + broken, expect=valid, answer=summary(gold))
+    del spare_row
 
     def alert(report: dict, city: str) -> dict:
         return next(a for a in report["alerts"] if a["city"] == city)
@@ -196,7 +248,7 @@ def main() -> int:
         entry["values"]["max_temp"] = row.max_temp_c
         entry["values"]["wind"] = row.max_wind_kmh
         entry["values"]["rain"] = row.rain_mm
-    write_case("wrong_unit", "Values left in °C, km/h and mm although °F, mph and in were requested.", arguments, pinned, wrong,
+    write_case("wrong_unit", "Values left in °C, km/h and mm although °F, mph and in were requested.", arguments, pinned, read + report_steps(wrong),
                expect={"valid": False, "message_contains": "with a wrong value", "score_max": 0.5}, answer=summary(wrong))
 
     # banker's rounding: the tie city's humidity rounded half to even
@@ -207,85 +259,73 @@ def main() -> int:
     if even == alert(gold, tie_city)["values"]["humidity"]:
         raise RuntimeError("the tie did not change under half-even rounding")
     alert(wrong, tie_city)["values"]["humidity"] = even
-    write_case("bankers_rounding", f"{tie_city}'s mean humidity {mean.numerator}/24 rounded half to even ({even}) instead of half up.", arguments, pinned, wrong,
+    write_case("bankers_rounding", f"{tie_city}'s mean humidity {mean.numerator}/24 rounded half to even ({even}) instead of half up.", arguments, pinned, read + report_steps(wrong),
                expect={"valid": False, "message_contains": "with a wrong value"}, answer=summary(wrong))
 
     # boundary: the city whose high equals the threshold left out, as if >= were >
     wrong = json.loads(json.dumps(gold))
     wrong["alerts"] = [a for a in wrong["alerts"] if a["city"] != boundary_city]
-    write_case("boundary", f"{boundary_city}'s high is exactly the max_temp threshold and satisfies >=, but was treated as if the rule were >.", arguments, pinned, wrong,
+    write_case("boundary", f"{boundary_city}'s high is exactly the max_temp threshold and satisfies >=, but was treated as if the rule were >.", arguments, pinned, read + report_steps(wrong),
                expect={"valid": False, "message_contains": "alert(s) missing"}, answer=summary(wrong))
 
     # missing city: one alert dropped
     wrong = json.loads(json.dumps(gold))
     dropped = wrong["alerts"].pop(len(wrong["alerts"]) // 2)
-    write_case("missing_city", f"{dropped['city']} left out of the alerts.", arguments, pinned, wrong,
+    write_case("missing_city", f"{dropped['city']} left out of the alerts.", arguments, pinned, read + report_steps(wrong),
                expect={"valid": False, "message_contains": "alert(s) missing", "score_max": 0.99}, answer=summary(wrong))
 
     # extra city: a city that does not qualify added with its true values
-    alerted = {a["city"] for a in gold["alerts"]}
     spare = next(row for row in pinned.metric if row.city not in alerted and row.city not in {u["city"] for u in gold["unavailable"]})
+    spare_metric = metrics_of(pinned)[[row.city for row in pinned.metric].index(spare.city)]
     wrong = json.loads(json.dumps(gold))
-    needed = [c.variable for c in parse_conditions(arguments["conditions"])]
-    values = {}
-    for variable in dict.fromkeys(needed):
-        metric = {"max_temp": spare.max_temp_c, "humidity": Fraction(int(spare.humidity_sum_pct), spare.humidity_hours), "rain": spare.rain_mm, "wind": spare.max_wind_kmh}[variable]
-        exact = convert(variable, Fraction(Decimal(str(metric))) if not isinstance(metric, Fraction) else metric, units)
-        values[variable] = float((Decimal(exact.numerator) / Decimal(exact.denominator)).quantize(Decimal("0.1")))
+    values = {variable: rounded(variable, spare_metric, units) for variable in dict.fromkeys(c.variable for c in conditions)}
     wrong["alerts"].append({"city": spare.city, "values": values, "matched": [arguments["conditions"][1]]})
-    write_case("extra_city", f"{spare.city} added although no rule holds for it.", arguments, pinned, wrong,
+    write_case("extra_city", f"{spare.city} added although no rule holds for it.", arguments, pinned, read + report_steps(wrong),
                expect={"valid": False, "message_contains": "extra alert(s)", "score_max": 0.99}, answer=summary(wrong))
 
     # any vs all: the rules evaluated with "all" although the task says "any"
-    as_all = plain_report(arguments["date"], evaluate([verifier.pin.metrics_from_plain(r.city, r.hours, r.max_temp_c, r.min_temp_c, r.rain_mm, r.max_wind_kmh, r.humidity_sum_pct, r.humidity_hours, r.missing) for r in pinned.metric], parse_conditions(arguments["conditions"]), "all", units))
+    as_all = plain_report(date, evaluate(metrics_of(pinned), conditions, "all", units))
     if as_all == gold:
         raise RuntimeError("all and any give the same report")
-    write_case("any_vs_all", 'Rules combined with "all" although the task asked for "any".', arguments, pinned, as_all,
+    write_case("any_vs_all", 'Rules combined with "all" although the task asked for "any".', arguments, pinned, read + report_steps(as_all),
                expect={"valid": False, "message_contains": "alert(s) missing"}, answer=summary(as_all))
 
-    # fabricated values: one value nudged and one matched rule dropped
+    # fabricated values: one value nudged and one matched rule added
     wrong = json.loads(json.dumps(gold))
-    first = wrong["alerts"][0]
-    key = next(iter(first["values"]))
-    first["values"][key] = round(first["values"][key] + 0.1, 1)
+    first_alert = wrong["alerts"][0]
+    key = next(iter(first_alert["values"]))
+    first_alert["values"][key] = round(first_alert["values"][key] + 0.1, 1)
     second = wrong["alerts"][1]
     second["matched"] = second["matched"] + [c for c in arguments["conditions"] if c not in second["matched"]][:1]
-    write_case("fabricated", f"{first['city']}'s {key} nudged by 0.1 and a rule {second['city']} does not meet listed as matched.", arguments, pinned, wrong,
+    write_case("fabricated", f"{first_alert['city']}'s {key} nudged by 0.1 and a rule {second['city']} does not meet listed as matched.", arguments, pinned, read + report_steps(wrong),
                expect={"valid": False, "message_contains": "wrong"}, answer=summary(wrong))
 
-    # empty report
-    empty = {"date": arguments["date"], "alerts": [], "unavailable": []}
-    write_case("empty_report", "An empty report although cities qualify.", arguments, pinned, empty,
+    # empty report: every city examined, nothing reported
+    empty = {"date": date, "examined": list(gold["examined"]), "alerts": [], "unavailable": []}
+    write_case("empty_report", "An empty report although cities qualify.", arguments, pinned, read + report_steps(empty),
                expect={"valid": False, "message_contains": "alert(s) missing", "score_max": 0.0}, answer=summary(empty))
 
     # no report at all
-    write_case("no_report", "The agent reads the data but never calls report_alerts.", arguments, pinned, None,
+    write_case("no_report", "The agent reads the data but never calls report_alerts.", arguments, pinned, read,
                expect={"valid": False, "message_contains": "no report", "score_max": 0.0}, answer="I could not decide.")
 
     # duplicate city: refused by report_alerts, so no report is written
     doubled = json.loads(json.dumps(gold))
     doubled["alerts"].append(json.loads(json.dumps(doubled["alerts"][0])))
-    case = {
-        "note": "The same city reported twice: report_alerts refuses it, so no report is saved.",
-        "task": TASK,
-        "arguments": arguments,
-        "steps": steps(arguments, None) + [{"tool": "report_alerts", "arguments": doubled, "expect_error": True}],
-        "answer": summary(doubled),
-        "expect": {"valid": False, "message_contains": "no report", "score_max": 0.0},
-    }
-    (CASES / "duplicate_city.json").write_text(json.dumps(case, indent=2) + "\n", encoding="utf-8")
-    print(f"{'duplicate_city':18} (report refused at input; verdict: no report)")
+    write_case("duplicate_city", "The same city reported twice: report_alerts refuses it, so no report is saved.", arguments, pinned,
+               read + [{"tool": "report_alerts", "arguments": doubled, "expect_error": True}],
+               expect={"valid": False, "message_contains": "no report", "score_max": 0.0}, answer=summary(doubled))
 
-    # ----- The DST gold case: Santiago's 23-hour day -----
+    # ----- The DST day: Santiago's 23-hour day, on the prescribed chunked path -----
     dst_arguments = {"date": DST_DATE, "match": "any", "temperature_unit": "F", "wind_unit": "ms", "rain_unit": "mm", "conditions": ["min_temp < 50", "humidity >= 85"]}
     dst_pin = pin(dst_arguments)
-    dst_expected = expected_of(build_output(dst_arguments, AlertInput), dst_pin)
-    dst_gold = plain_report(DST_DATE, dst_expected)
+    dst_gold = plain_report(DST_DATE, expected_of(build_output(dst_arguments, AlertInput), dst_pin))
     santiago = next(row for row in dst_pin.metric if row.city == "Santiago")
     if santiago.hours != 23 or "Santiago" not in {a["city"] for a in dst_gold["alerts"]}:
         raise RuntimeError("Santiago is not a 23-hour alert on the DST day")
-    write_case("gold_dst", "The exact report for Santiago's 23-hour day (clocks went forward at midnight).", dst_arguments, dst_pin, dst_gold,
-               expect={"valid": True, "score_min": 1.0}, answer=summary(dst_gold))
+    dst_read = read_steps(DST_DATE)
+    write_case("gold_dst", "The exact report for Santiago's 23-hour day (clocks went forward at midnight), in three report_alerts calls.",
+               dst_arguments, dst_pin, dst_read + report_steps(dst_gold, CHUNKS), expect=valid, answer=summary(dst_gold))
 
     # Santiago aggregated over the 24 UTC hours of the date instead of its local day
     utc = utc_day_metrics("Santiago", DST_DATE)
@@ -293,12 +333,11 @@ def main() -> int:
     entry = alert(wrong, "Santiago")
     dst_units = Units("F", "ms", "mm")
     for variable in list(entry["values"]):
-        exact = convert(variable, exact_metric(utc, variable), dst_units)
-        entry["values"][variable] = float(round_half_up(exact))
+        entry["values"][variable] = rounded(variable, utc, dst_units)
     if entry["values"] == alert(dst_gold, "Santiago")["values"]:
         raise RuntimeError("the UTC day gives Santiago the same values as its local day")
-    write_case("dst_utc_day", "Santiago's values taken over the 24 UTC hours of the date instead of its 23-hour local day.", dst_arguments, dst_pin, wrong,
-               expect={"valid": False, "message_contains": "with a wrong value"}, answer=summary(wrong))
+    write_case("dst_utc_day", "Santiago's values taken over the 24 UTC hours of the date instead of its 23-hour local day.",
+               dst_arguments, dst_pin, dst_read + report_steps(wrong, CHUNKS), expect={"valid": False, "message_contains": "with a wrong value"}, answer=summary(wrong))
 
     # sanity: the hourly rows of the DST day really skip the missing hour
     hours = get_hourly(build_output({"city": "Santiago", "date": DST_DATE}, HourlyInput), Path(tempfile.mkdtemp()))

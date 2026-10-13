@@ -39,8 +39,9 @@ EXPECTED_ALERTS = [
     {"city": "Soaked", "values": {"max_temp": 77.0, "rain": 0.5, "wind": 3.1}, "matched": ["rain > 0.5"]},
 ]
 EXPECTED_UNAVAILABLE = [{"city": "Gap", "variables": ["max_temp"]}]
+EXAMINED = [row["city"] for row in METRIC]
 REFERENCE = {"date": DATE, "metric": METRIC, "alerts": EXPECTED_ALERTS, "unavailable": EXPECTED_UNAVAILABLE}
-GOLD = {"date": DATE, "alerts": EXPECTED_ALERTS, "unavailable": EXPECTED_UNAVAILABLE}
+GOLD = {"date": DATE, "examined": EXAMINED, "alerts": EXPECTED_ALERTS, "unavailable": EXPECTED_UNAVAILABLE}
 
 
 def verify_input(tool: str, value: dict) -> dict:
@@ -79,25 +80,28 @@ def with_alert(name, **changes):
 
 
 def test_approves_the_exact_report_whatever_its_order(tmp_path: Path) -> None:
-    shuffled = {"date": DATE, "alerts": list(reversed(EXPECTED_ALERTS)), "unavailable": EXPECTED_UNAVAILABLE}
+    shuffled = {"date": DATE, "examined": list(reversed(EXAMINED)), "alerts": list(reversed(EXPECTED_ALERTS)), "unavailable": EXPECTED_UNAVAILABLE}
     shuffled["alerts"][0] = {**shuffled["alerts"][0], "values": {"wind": 3.1, "max_temp": 77, "rain": 0.5}}
     found = verdict(tmp_path, shuffled)
     assert found["valid"] is True and found["score"] == 1.0
     assert found["details"]["expected"] == GOLD
     assert found["details"]["conditions"] == ["max_temp >= 95", "wind >= 25", "rain > 0.5"]
     assert found["details"]["units"] == {"temperature": "F", "wind": "mph", "rain": "in"}
+    assert found["details"]["examined"] == 6 and found["details"]["unexamined"] == [] and found["details"]["unknown_examined"] == []
+    assert "every city examined" in found["message"]
 
 
 def test_recomputes_from_the_metric_rows_not_the_pins_own_list(tmp_path: Path) -> None:
     lying = {**REFERENCE, "alerts": [], "unavailable": []}
     assert verdict(tmp_path, GOLD, reference=lying)["valid"] is True
-    assert verdict(tmp_path, {"date": DATE, "alerts": [], "unavailable": []}, reference=lying)["valid"] is False
+    assert verdict(tmp_path, {"date": DATE, "examined": EXAMINED, "alerts": [], "unavailable": []}, reference=lying)["valid"] is False
 
 
 def test_approves_an_empty_report_when_nothing_qualifies(tmp_path: Path) -> None:
     arguments = {**ARGUMENTS, "conditions": ["max_temp >= 200"]}
     reference = {**REFERENCE, "metric": [row for row in METRIC if row["city"] != "Gap"]}
-    found = verdict(tmp_path, {"date": DATE, "alerts": [], "unavailable": []}, arguments=arguments, reference=reference)
+    examined = [city for city in EXAMINED if city != "Gap"]
+    found = verdict(tmp_path, {"date": DATE, "examined": examined, "alerts": [], "unavailable": []}, arguments=arguments, reference=reference)
     assert found["valid"] is True and found["score"] == 1.0
 
 
@@ -119,7 +123,10 @@ def test_approves_an_empty_report_when_nothing_qualifies(tmp_path: Path) -> None
         ("unavailable wrong variables", changed(unavailable=[{"city": "Gap", "variables": ["max_temp", "wind"]}]), "wrong variables", "unavailable_mismatches", 0.75),
         ("unavailable extra", changed(unavailable=EXPECTED_UNAVAILABLE + [{"city": "Calm", "variables": ["rain"]}]), "extra unavailable", "extra_unavailable", 8 / 9),
         ("empty report", changed(alerts=[], unavailable=[]), "alert(s) missing", "missing_alerts", 0.0),
-        ("unknown city", changed(alerts=EXPECTED_ALERTS + [{"city": "Atlantis", "values": {"max_temp": 99.0, "rain": 0.0, "wind": 0.0}, "matched": ["max_temp >= 95"]}]), "extra alert(s)", "extra_alerts", 8 / 9),
+        ("unknown city", changed(examined=EXAMINED + ["Atlantis"], alerts=EXPECTED_ALERTS + [{"city": "Atlantis", "values": {"max_temp": 99.0, "rain": 0.0, "wind": 0.0}, "matched": ["max_temp >= 95"]}]), "extra alert(s)", "extra_alerts", 8 / 9 * 6 / 7),
+        ("a city unexamined", changed(examined=[city for city in EXAMINED if city != "Calm"]), "1 city(ies) unexamined (Calm)", "unexamined", 5 / 6),
+        ("unexamined and wrong", changed(examined=[city for city in EXAMINED if city != "Boundary"], alerts=[a for a in EXPECTED_ALERTS if a["city"] != "Boundary"]), "unexamined", "missing_alerts", 6 / 7 * 5 / 6),
+        ("unknown examined name", changed(examined=EXAMINED + ["Atlantis"]), "not in the snapshot", "unknown_examined", 6 / 7),
     ],
 )
 def test_refuses_every_wrong_report_and_scores_it(tmp_path: Path, name: str, report: dict, message: str, key: str, score: float) -> None:
@@ -136,16 +143,17 @@ def test_refuses_every_wrong_report_and_scores_it(tmp_path: Path, name: str, rep
     [
         (None, "no report at weather-alert/2026-09-06.json"),
         ("not json", "is not JSON"),
-        ({"alerts": [], "unavailable": []}, "must hold date, alerts and unavailable"),
-        ({"date": "2026-09-05", "alerts": [], "unavailable": []}, "for another day"),
-        ({"date": DATE, "alerts": [{"city": "Gale", "values": {"wind": "30"}, "matched": []}], "unavailable": []}, "values must map"),
-        ({"date": DATE, "alerts": [{"city": "Gale", "values": {"gust": 30.0}, "matched": []}], "unavailable": []}, "values must map"),
-        ({"date": DATE, "alerts": [{"city": "Gale", "values": {}, "matched": ["wind >>= 25"]}], "unavailable": []}, "matched"),
-        ({"date": DATE, "alerts": [{"city": "Gale", "values": {}, "matched": ["wind >= 25", "wind >= 25.0"]}], "unavailable": []}, "listed twice"),
-        ({"date": DATE, "alerts": [{"city": "Gale", "values": {}, "matched": []}, {"city": "Gale", "values": {}, "matched": []}], "unavailable": []}, "once"),
-        ({"date": DATE, "alerts": [], "unavailable": [{"city": "Gap", "variables": []}]}, "variables must name"),
-        ({"date": DATE, "alerts": [], "unavailable": [{"city": "Gap", "variables": ["max_temp", "max_temp"]}]}, "distinct"),
-        ({"date": DATE, "alerts": [{"city": f"City {n}", "values": {}, "matched": []} for n in range(31)], "unavailable": []}, "at most 30"),
+        ({"alerts": [], "unavailable": []}, "must hold date, examined, alerts and unavailable"),
+        ({"date": "2026-09-05", "examined": EXAMINED, "alerts": [], "unavailable": []}, "for another day"),
+        ({"date": DATE, "examined": EXAMINED + ["Gale"], "alerts": [], "unavailable": []}, "distinct city names"),
+        ({"date": DATE, "examined": ["Gale"], "alerts": [{"city": "Gap", "values": {}, "matched": []}], "unavailable": []}, "must be listed in examined"),
+        ({"date": DATE, "examined": EXAMINED, "alerts": [{"city": "Gale", "values": {"wind": "30"}, "matched": []}], "unavailable": []}, "values must map"),
+        ({"date": DATE, "examined": EXAMINED, "alerts": [{"city": "Gale", "values": {"gust": 30.0}, "matched": []}], "unavailable": []}, "values must map"),
+        ({"date": DATE, "examined": EXAMINED, "alerts": [{"city": "Gale", "values": {}, "matched": ["wind >>= 25"]}], "unavailable": []}, "matched"),
+        ({"date": DATE, "examined": EXAMINED, "alerts": [{"city": "Gale", "values": {}, "matched": ["wind >= 25", "wind >= 25.0"]}], "unavailable": []}, "listed twice"),
+        ({"date": DATE, "examined": EXAMINED, "alerts": [{"city": "Gale", "values": {}, "matched": []}, {"city": "Gale", "values": {}, "matched": []}], "unavailable": []}, "once"),
+        ({"date": DATE, "examined": EXAMINED, "alerts": [], "unavailable": [{"city": "Gap", "variables": []}]}, "variables must name"),
+        ({"date": DATE, "examined": EXAMINED, "alerts": [], "unavailable": [{"city": "Gap", "variables": ["max_temp", "max_temp"]}]}, "distinct"),
     ],
 )
 def test_refuses_a_missing_or_malformed_report(tmp_path: Path, report, message: str) -> None:
@@ -208,10 +216,14 @@ def test_checks_the_other_tool_inputs() -> None:
     assert verify_input("report_alerts", {**GOLD, "alerts": bad_matched})["valid"] is False
     bad_values = [{**GOLD["alerts"][0], "values": {"gust": 1.0}}]
     assert verify_input("report_alerts", {**GOLD, "alerts": bad_values})["valid"] is False
-    crowd = [{"city": f"City {n}", "values": {}, "matched": []} for n in range(31)]
-    found = verify_input("report_alerts", {**GOLD, "alerts": crowd, "unavailable": []})
-    assert found["valid"] is False and "at most 30" in found["message"]
-    assert verify_input("report_alerts", {**GOLD, "alerts": crowd[:30], "unavailable": []})["valid"] is True
+    crowd = [f"City {n}" for n in range(31)]
+    found = verify_input("report_alerts", {"date": DATE, "examined": crowd, "alerts": [], "unavailable": []})
+    assert found["valid"] is False and "1 to 30" in found["message"]
+    assert verify_input("report_alerts", {"date": DATE, "examined": crowd[:30], "alerts": [], "unavailable": []})["valid"] is True
+    assert verify_input("report_alerts", {"date": DATE, "examined": [], "alerts": [], "unavailable": []})["valid"] is False
+    assert verify_input("report_alerts", {"date": DATE, "examined": ["Gale", "Gale"], "alerts": [], "unavailable": []})["valid"] is False
+    outside = verify_input("report_alerts", {**GOLD, "examined": ["Calm"]})
+    assert outside["valid"] is False and "must be listed in examined" in outside["message"]
 
 
 def test_checks_the_pin_against_its_own_aggregates(tmp_path: Path) -> None:
@@ -252,11 +264,20 @@ def test_checks_get_hourly_output(tmp_path: Path) -> None:
 
 
 def test_checks_the_saved_report(tmp_path: Path) -> None:
-    saved = {"path": f"weather-alert/{DATE}.json", "alerts": 3, "unavailable": 1}
-    assert verify_output("report_alerts", GOLD, saved, tmp_path)["valid"] is False  # nothing saved yet
+    counts = {"path": f"weather-alert/{DATE}.json", "alerts": 3, "unavailable": 1, "examined": 6}
+    assert verify_output("report_alerts", GOLD, counts, tmp_path)["valid"] is False  # nothing saved yet
     (tmp_path / "weather-alert").mkdir()
     (tmp_path / "weather-alert" / f"{DATE}.json").write_text(json.dumps(GOLD))
-    assert verify_output("report_alerts", GOLD, saved, tmp_path)["valid"] is True
-    assert verify_output("report_alerts", changed(alerts=[]), {**saved, "alerts": 0}, tmp_path)["valid"] is False
-    assert verify_output("report_alerts", GOLD, {**saved, "path": "report.json"}, tmp_path)["valid"] is False
-    assert verify_output("report_alerts", GOLD, {**saved, "alerts": 2}, tmp_path)["valid"] is False
+    assert verify_output("report_alerts", GOLD, counts, tmp_path)["valid"] is True
+    # one chunk of the same file: its judgement is in the file, and the counts are the file's
+    chunk = {"date": DATE, "examined": ["Gale", "Calm"], "alerts": [EXPECTED_ALERTS[1]], "unavailable": []}
+    assert verify_output("report_alerts", chunk, counts, tmp_path)["valid"] is True
+    assert verify_output("report_alerts", chunk, {**counts, "alerts": 1}, tmp_path)["valid"] is False
+    assert verify_output("report_alerts", chunk, {**counts, "path": "report.json"}, tmp_path)["valid"] is False
+    # a call whose judgement the file does not hold: an examined city still has a stale entry
+    stale = {"date": DATE, "examined": ["Gale"], "alerts": [], "unavailable": []}
+    found = verify_output("report_alerts", stale, counts, tmp_path)
+    assert found["valid"] is False and "judgement of Gale" in found["message"]
+    # a call whose examined cities the file never recorded
+    elsewhere = {"date": DATE, "examined": ["Nowhere"], "alerts": [], "unavailable": []}
+    assert verify_output("report_alerts", elsewhere, counts, tmp_path)["valid"] is False

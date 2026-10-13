@@ -88,6 +88,7 @@ class Alert:
 class Expected:
     alerts: tuple[Alert, ...]  # in the order of the metric rows
     unavailable: dict[str, tuple[str, ...]]  # city -> the needed variables it has no complete day for
+    examined: tuple[str, ...]  # every city judged, in the order of the metric rows
 
 
 # ----- Dates -----
@@ -289,13 +290,14 @@ def evaluate(metrics: list[DayMetrics], conditions: list[Condition], match: str,
         matched = tuple(condition.text for condition in conditions if holds(exact[condition.variable], condition))
         if (match == "all" and len(matched) == len(conditions)) or (match == "any" and matched):
             alerts.append(Alert(day.city, {variable: round_half_up(exact[variable]) for variable in needed}, matched))
-    return Expected(tuple(alerts), unavailable)
+    return Expected(tuple(alerts), unavailable, tuple(day.city for day in metrics))
 
 
 def plain_report(date: str, expected: Expected) -> dict:
     """``expected`` as the report file's JSON: what report_alerts writes for a perfect answer."""
     return {
         "date": date,
+        "examined": list(expected.examined),
         "alerts": [
             {"city": alert.city, "values": {k: float(v) for k, v in alert.values.items()}, "matched": list(alert.matched)}
             for alert in expected.alerts

@@ -59,9 +59,10 @@ def verify_output(input_value, output_value, workspace):
             return result(False, problem)
         if not 0 <= row.humidity_hours <= row.hours or (row.humidity_sum_pct is None) != (row.humidity_hours == 0):
             return result(False, f"{row.city}: the humidity sum and its hour count disagree")
-    pinned = {"date": output_value.date, **plain_report(output_value.date, expected_of(input_value, output_value))}
+    pinned = plain_report(output_value.date, expected_of(input_value, output_value))
     own = {
         "date": output_value.date,
+        "examined": [row.city for row in output_value.metric],
         "alerts": [{"city": a.city, "values": dict(a.values), "matched": list(a.matched)} for a in output_value.alerts],
         "unavailable": [{"city": u.city, "variables": list(u.variables)} for u in output_value.unavailable],
     }
@@ -110,9 +111,28 @@ def verify_task(arguments, reference, workspace):
         return result(False, f"{report_path(arguments.date)}: {problem}", score=0.0, **report)
     if submitted["date"] != arguments.date:
         return result(False, "the report is for another day", score=0.0, **report)
+    cities = set(expected.examined)
+    examined = set(submitted["examined"])
+    coverage = {
+        "examined": len(examined & cities),
+        "unexamined": sorted(cities - examined),
+        "unknown_examined": sorted(examined - cities),
+    }
     score, problems, differences = compare(expected, submitted)
     counts = f"{len(expected.alerts)} alert(s) and {len(expected.unavailable)} unavailable city(ies)"
+    if coverage["unexamined"] or coverage["unknown_examined"]:
+        # Every city must be judged: the entries' F1 is scaled by the share of the pinned cities among
+        # the pinned and the examined ones, so an unexamined city and a name not in the snapshot both cost.
+        score = score * len(examined & cities) / len(examined | cities)
+        parts = []
+        if coverage["unexamined"]:
+            named = ", ".join(coverage["unexamined"][:5]) + (", …" if len(coverage["unexamined"]) > 5 else "")
+            parts.append(f"{len(coverage['unexamined'])} city(ies) unexamined ({named})")
+        if coverage["unknown_examined"]:
+            parts.append(f"{len(coverage['unknown_examined'])} examined name(s) not in the snapshot")
+        message = "; ".join(parts + problems)
+        return result(False, f"{message}: expected all {len(cities)} cities examined and exactly {counts} (F1 {score:.2f})", score=score, **differences, **coverage, **report)
     if problems:
         message = f"{'; '.join(problems)}: expected exactly {counts} (F1 {score:.2f})"
-        return result(False, message, score=score, **differences, **report)
-    return result(True, f"exactly the {counts}", score=score, **report)
+        return result(False, message, score=score, **differences, **coverage, **report)
+    return result(True, f"every city examined, exactly the {counts}", score=score, **coverage, **report)

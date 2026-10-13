@@ -1,7 +1,7 @@
 _ > nanoagent.plugin.manifest.ManifestConfig:
 id: weather-alert
 name: Weather Alert
-version: 0.1.1
+version: 0.1.2
 status: ready
 
 runtime > nanoagent.plugin.manifest.RuntimeConfig:
@@ -25,7 +25,7 @@ tools > dict[contract.Tool, nanoagent.plugin.manifest.ToolConfig]:
   get_hourly:
     description: Get one city's hourly rows over its local calendar day, in metric units
   report_alerts:
-    description: Report the alert cities with their values and matched conditions, and the unavailable cities, to weather-alert/<date>.json
+    description: Report the judgement of up to 30 examined cities (alert cities with values and matched conditions, unavailable cities), merged by city into weather-alert/<date>.json
 
 # One entry per contract.Task; its input class is contract.TASKS's.
 tasks > dict[contract.Task, nanoagent.plugin.manifest.TaskConfig]:
@@ -36,7 +36,8 @@ tasks > dict[contract.Task, nanoagent.plugin.manifest.TaskConfig]:
     reference: pin_alerts
     instructions: |-
       Rules. A condition is "<variable> <op> <number>". max_temp and min_temp are the day's highest and lowest hourly temperature, rain is the day's precipitation total, wind is the day's highest hourly wind speed, and humidity is the day's mean relative humidity in % (the arithmetic mean over the hours present). op is >=, >, <= or <, and the number is in the requested units. With match "all" a city is an alert when every condition holds for it; with "any" when at least one does. The day is each city's local calendar day: it has 23 hours when clocks go forward, 25 when they go back, else 24.
-      Data. Call list_cities once with the date, then get_daily once with every city it lists (up to 30 per call): it gives each day's aggregates in metric units (°C, mm, km/h, %) and the source variables with a missing hour. Work from those aggregates; every city must be examined. Call get_hourly only when you need to inspect one city's day, such as a city with a missing hour or a day with 23 or 25 hours: it costs about 700 tokens per city. You have 6 steps in all, so finish in 4: list_cities, get_daily, report_alerts, then your answer.
+      Cities. The 30 cities are Athens, Auckland, Bangkok, Buenos Aires, Cairo, Cape Town, Denver, Dubai, Honolulu, Houston, Jakarta, Lagos, Lima, London, Madrid, Mexico City, Moscow, Mumbai, Nairobi, Oslo, Perth, Phoenix, Reykjavik, Santiago, Seoul, Singapore, Sydney, Tokyo, Toronto, Vancouver. list_cities only repeats them with each day's hour count, so skip it.
+      Data. Call get_daily once with all 30 cities: it gives each day's aggregates in metric units (°C, mm, km/h, %), its hour count (23 or 25 on a day clocks change) and the source variables with a missing hour. Work from those aggregates; every city must be examined. Call get_hourly only when you need to inspect one city's day, such as a city with a missing hour: it costs about 700 tokens per city.
       Arithmetic, done exactly with Decimal or Fraction, never with binary floats. °F = °C × 9/5 + 32; mph = km/h ÷ 1.609344; m/s = km/h ÷ 3.6; in = mm ÷ 25.4; humidity stays in %. Test each condition against the exact, unrounded converted value. Report each value rounded to 1 decimal, half up (Decimal's ROUND_HALF_UP), in the requested units: 24.95 becomes 25.0 and 71.25 becomes 71.3, while 24.979 mph is not >= 25 even though it is reported as 25.0.
       Missing data. A city whose get_daily "missing" names the source of a variable a condition uses (max_temp and min_temp come from temperature_2m, rain from precipitation, wind from wind_speed_10m, humidity from relative_humidity_2m) goes under unavailable with those variables, and is never an alert, whatever its values.
-      Report. Call report_alerts once, with the whole report in that one call: the date; every alert city with values (one entry per variable the conditions use, in the requested units, rounded as above) and matched (the conditions that hold for it, as given); and every unavailable city with its variables. Use [] where there are none. Then answer with a short summary naming each alert city and its values.
+      Report. Then call report_alerts three times, each covering 10 cities (name them in examined): do the conversions and comparisons for those 10 cities only in that step. Each call merges into weather-alert/<date>.json: the cities it examines are restated by that call (their earlier entries are replaced, and an examined city with no entry has no alert) and every other city is kept, so the final file must examine all 30. Give every alert city its values (one entry per variable the conditions use, in the requested units, rounded as above) and matched (the conditions that hold for it, as given), and every unavailable city its variables; use [] where there are none. Then answer with a short summary naming each alert city and its values. That is 4 tool calls in the 6 available.

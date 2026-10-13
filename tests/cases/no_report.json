@@ -16,13 +16,6 @@
   },
   "steps": [
     {
-      "tool": "list_cities",
-      "arguments": {
-        "date": "2026-07-07"
-      },
-      "save_as": "cities"
-    },
-    {
       "tool": "get_daily",
       "arguments": {
         "cities": [

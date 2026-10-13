@@ -126,19 +126,54 @@ def test_the_local_day_is_not_the_utc_day(tmp_path: Path) -> None:
     assert round(float(utc_mean), 1) != local.mean_humidity_pct
 
 
-def test_report_alerts_writes_and_replaces_the_report(tmp_path: Path) -> None:
-    first = build_output({"date": DATE, "alerts": [{"city": "Cairo", "values": {"max_temp": 98.8}, "matched": ["max_temp >= 95"]}], "unavailable": []}, ReportInput)
-    written = report_alerts(first, tmp_path)
-    assert written.path == f"weather-alert/{DATE}.json" and (written.alerts, written.unavailable) == (1, 0)
-    assert json.loads((tmp_path / "weather-alert" / f"{DATE}.json").read_text()) == plain_output(first)
-    second = build_output({"date": DATE, "alerts": [], "unavailable": [{"city": "Lima", "variables": ["rain"]}]}, ReportInput)
-    report_alerts(second, tmp_path)
-    assert json.loads((tmp_path / "weather-alert" / f"{DATE}.json").read_text()) == plain_output(second)
-    doubled = build_output({"date": DATE, "alerts": [{"city": "Cairo", "values": {}, "matched": []}], "unavailable": [{"city": "Cairo", "variables": ["rain"]}]}, ReportInput)
-    with pytest.raises(ValueError, match="once"):
-        report_alerts(doubled, tmp_path)
+def report(date, examined, alerts=(), unavailable=()):
+    return build_output({"date": date, "examined": list(examined), "alerts": list(alerts), "unavailable": list(unavailable)}, ReportInput)
+
+
+def saved(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "weather-alert" / f"{DATE}.json").read_text())
+
+
+def test_report_alerts_merges_each_call_by_city(tmp_path: Path) -> None:
+    cairo = {"city": "Cairo", "values": {"max_temp": 98.0}, "matched": ["max_temp >= 95"]}
+    first = report_alerts(report(DATE, NAMES[:10], alerts=[cairo]), tmp_path)
+    assert first.path == f"weather-alert/{DATE}.json" and (first.alerts, first.unavailable, first.examined) == (1, 0, 10)
+    assert saved(tmp_path) == {"date": DATE, "examined": NAMES[:10], "alerts": [cairo], "unavailable": []}
+    lima = {"city": "Lima", "variables": ["rain"]}
+    second = report_alerts(report(DATE, NAMES[10:20], unavailable=[lima]), tmp_path)
+    assert (second.alerts, second.unavailable, second.examined) == (1, 1, 20)
+    # a later call restates the cities it examines: Cairo's values replaced, nothing else touched
+    fixed = {**cairo, "values": {"max_temp": 98.8}}
+    third = report_alerts(report(DATE, NAMES[20:30] + ["Cairo"], alerts=[fixed]), tmp_path)
+    assert (third.alerts, third.unavailable, third.examined) == (1, 1, 30)
+    assert saved(tmp_path) == {"date": DATE, "examined": NAMES, "alerts": [fixed], "unavailable": [lima]}
+    # an examined city with no entry has no alert: Cairo's goes; Lima turns from unavailable into an alert
+    lima_alert = {"city": "Lima", "values": {"max_temp": 70.0}, "matched": []}
+    fourth = report_alerts(report(DATE, ["Cairo", "Lima"], alerts=[lima_alert]), tmp_path)
+    assert (fourth.alerts, fourth.unavailable, fourth.examined) == (1, 0, 30)
+    assert saved(tmp_path)["alerts"] == [lima_alert] and saved(tmp_path)["unavailable"] == []
+
+
+@pytest.mark.parametrize(
+    ("examined", "alerts", "unavailable", "error"),
+    [
+        ([], [], [], "1 to 30"),
+        (NAMES + ["Atlantis"], [], [], "1 to 30"),
+        (["Athens", "Athens"], [], [], "1 to 30"),
+        (["Atlantis"], [], [], "unknown city Atlantis"),
+        (["Athens"], [{"city": "Cairo", "values": {}, "matched": []}], [], "must be listed in examined"),
+        (["Athens", "Cairo"], [{"city": "Cairo", "values": {}, "matched": []}], [{"city": "Cairo", "variables": ["rain"]}], "once"),
+    ],
+)
+def test_report_alerts_refuses_bad_calls(tmp_path: Path, examined, alerts, unavailable, error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        report_alerts(report(DATE, examined, alerts, unavailable), tmp_path)
+
+
+def test_report_alerts_refuses_a_foreign_file_and_bad_dates(tmp_path: Path) -> None:
+    (tmp_path / "weather-alert").mkdir()
+    (tmp_path / "weather-alert" / f"{DATE}.json").write_text("not a report")
+    with pytest.raises(ValueError, match="not a report"):
+        report_alerts(report(DATE, ["Athens"]), tmp_path)
     with pytest.raises(ValueError, match="outside the snapshot"):
-        report_alerts(build_output({"date": "2027-01-01", "alerts": [], "unavailable": []}, ReportInput), tmp_path)
-    crowd = [{"city": f"City {n}", "values": {}, "matched": []} for n in range(31)]
-    with pytest.raises(ValueError, match="at most 30"):
-        report_alerts(build_output({"date": DATE, "alerts": crowd, "unavailable": []}, ReportInput), tmp_path)
+        report_alerts(report("2027-01-01", ["Athens"]), tmp_path)

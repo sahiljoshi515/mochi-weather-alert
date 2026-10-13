@@ -12,10 +12,10 @@ demands an exact match of the city set, every value and every matched rule.
 | Tool | Does | Code |
 |---|---|---|
 | `pin_alerts` | Every city's local day in metric units (the exact ingredients of each value) plus the alerts and unavailable cities the rules give; the task's pinned reference | `src/plugin/alerts.py` |
-| `list_cities` | The 30 cities, each with its country, time zone and how many hours its local calendar day has on the date (23, 24 or 25) | `src/plugin/alerts.py` |
+| `list_cities` | The 30 cities, each with its country, time zone and how many hours its local calendar day has on the date (23, 24 or 25); optional, since the task's instructions name the cities | `src/plugin/alerts.py` |
 | `get_daily` | Up to 30 cities' local-day aggregates on a date, so one call covers every city: highest and lowest temperature (°C), precipitation total (mm), highest wind (km/h), mean humidity (%), hour count and the variables with a missing hour | `src/plugin/alerts.py` |
 | `get_hourly` | One city's hourly rows over its local calendar day, in metric units; for inspecting one day (about 700 tokens), not the normal path | `src/plugin/alerts.py` |
-| `report_alerts` | Writes the whole answer, at most 30 cities, to `weather-alert/<date>.json`, replacing an earlier one | `src/plugin/alerts.py` |
+| `report_alerts` | Merges one call's judgement of up to 30 `examined` cities into `weather-alert/<date>.json`: the cities a call examines are restated by it (an examined city with no entry has no alert), every other city's entries are kept | `src/plugin/alerts.py` |
 
 The tools return metric data only. Converting to the requested units, rounding
 and applying the rules is the agent's work. The outputs are compact: `list_cities`
@@ -38,6 +38,13 @@ The input is a date, `match` (`all` or `any`), the units (`C`/`F`, `kmh`/`mph`/`
 variables `max_temp`, `min_temp`, `rain`, `wind`, `humidity`; operators `>=`,
 `>`, `<=`, `<`; a number with at most 2 decimals, in the requested units
 (humidity in %). Two conditions that mean the same are refused.
+
+The agent reports with `report_alerts`, which merges by city: each call names
+the cities it `examined` (1 to 30) with their alerts and unavailable entries,
+replaces those cities' earlier entries and keeps every other city's. The final
+file must have examined all 30 cities. The instructions prescribe one
+`get_daily` with all 30 cities, then three `report_alerts` calls of 10 cities
+each, then the answer: 4 tool calls of the 6 steps the hosted runner allows.
 
 ### Rules
 
@@ -100,16 +107,31 @@ The plugin's tools and the verifier never touch the network.
 
 `verifier/pin.py` recomputes the expected alerts from the pin's **metric**
 aggregates (never from the pin's own alert list) with the shared rules, then
-compares the report: the set of alert cities, each city's values and matched
-conditions, and the unavailable cities with their variables must all be exactly
-equal. The score is the F1 of the report's entries (alert and unavailable
-cities, an entry counting only when it is exactly right) against the expected
-ones; the verdict is valid only at an exact match. Details give the expected
-report and the missing, extra and mismatched entries. `verify_input` refuses
-malformed or duplicate conditions, bad dates and dates outside the snapshot,
-and more than 30 cities per `get_daily` call; `verify_output` of
-`report_alerts` checks the saved file equals the submitted report, and that of
-`pin_alerts` checks the pin agrees with its own aggregates.
+reads the merged report: every one of the pinned cities must be in its
+`examined` list (an unexamined city or a name that is not a city makes the
+verdict invalid, with the score scaled by the share of the pinned cities among
+the pinned and the examined ones), and the set of alert cities, each
+city's values and matched conditions, and the unavailable cities with their
+variables must all be exactly equal. The score is the F1 of the report's
+entries (alert and unavailable cities, an entry counting only when it is
+exactly right) against the expected ones; the verdict is valid only at an
+exact match. Details give the expected report, the unexamined cities, and the
+missing, extra and mismatched entries. `verify_input` refuses malformed or
+duplicate conditions, bad dates and dates outside the snapshot, more than 30
+cities per `get_daily` call, and a `report_alerts` call that reports a city it
+did not examine; `verify_output` of `report_alerts` checks the merged file
+holds that call's judgement of every city it examined and that the counts are
+the file's, and that of `pin_alerts` checks the pin agrees with its own
+aggregates.
+
+### Limits
+
+Mochi's hosted runner allows an agent 6 steps per run, a reply of 2,048 tokens
+per step (its hidden reasoning included) and a $0.10 budget, and members cannot
+raise them. Converting and judging all 30 cities inside one reply overflowed
+that cap in hosted runs, which ended with no report. So the report is made in
+three `report_alerts` calls of 10 examined cities each, and the whole task takes
+4 tool calls: `get_daily` with every city, the three reports, then the answer.
 
 ## Layout
 
@@ -172,7 +194,9 @@ uv run python src/plugin/tools_dev/build_cases.py
 ```
 
 The scripted cases in `tests/cases/` run the task as the hosted service does:
-Mochi's runner allows 6 agent steps per run, so the gold cases take the 4-step
-path (`list_cities`, one `get_daily` with all 30 cities, `report_alerts`, the
-answer); `batched_daily` reads the cities in two `get_daily` calls to show that
-batching still works.
+`gold_chunked` and `gold_dst` take the prescribed path (`get_daily` with all 30
+cities, three `report_alerts` calls of 10 examined cities, the answer), `gold`
+reports in one call, `batched_daily` reads the cities in two `get_daily` calls
+after `list_cities`, `corrected` fixes an earlier call's wrong value and bogus
+alert in a later call, and `unexamined` stops after two of the three calls and
+is refused. The wrong cases each break the gold report in one way.

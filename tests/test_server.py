@@ -48,9 +48,9 @@ def test_runs_a_gold_path_over_stdio(tmp_path: Path) -> None:
         assert not daily.isError and len(daily.structuredContent["cities"]) == 10
         hours = await session.call_tool("get_hourly", {"city": "Santiago", "date": DATE})
         assert not hours.isError and len(hours.structuredContent["rows"]) == 23
-        report = {"date": DATE, "alerts": [{"city": "Cairo", "values": {"max_temp": 98.8}, "matched": ["max_temp >= 95"]}], "unavailable": []}
+        report = {"date": DATE, "examined": ["Cairo"], "alerts": [{"city": "Cairo", "values": {"max_temp": 98.8}, "matched": ["max_temp >= 95"]}], "unavailable": []}
         saved = await session.call_tool("report_alerts", report)
-        assert not saved.isError and saved.structuredContent == {"path": f"weather-alert/{DATE}.json", "alerts": 1, "unavailable": 0}
+        assert not saved.isError and saved.structuredContent == {"path": f"weather-alert/{DATE}.json", "alerts": 1, "unavailable": 0, "examined": 1}
         unknown = await session.call_tool("get_daily", {"cities": ["Atlantis"], "date": DATE})
         assert unknown.isError and "unknown city Atlantis" in unknown.content[0].text
         bad_date = await session.call_tool("list_cities", {"date": "2026-12-25"})

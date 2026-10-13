@@ -255,6 +255,7 @@ def test_plain_report_is_the_report_file_shape() -> None:
     report = plain_report("2026-08-01", evaluate(days, parse_conditions(["max_temp >= 95"]), "all", IMPERIAL))
     assert report == {
         "date": "2026-08-01",
+        "examined": ["A", "B"],
         "alerts": [{"city": "A", "values": {"max_temp": 95.0}, "matched": ["max_temp >= 95"]}],
         "unavailable": [{"city": "B", "variables": ["max_temp"]}],
     }

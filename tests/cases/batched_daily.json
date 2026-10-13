@@ -1,5 +1,5 @@
 {
-  "note": "The exact report, with the cities read in two get_daily calls of 15 instead of one.",
+  "note": "The exact report after list_cities and two get_daily calls of 15 instead of one.",
   "task": "daily-alert",
   "arguments": {
     "date": "2026-07-07",
@@ -72,6 +72,38 @@
       "tool": "report_alerts",
       "arguments": {
         "date": "2026-07-07",
+        "examined": [
+          "Athens",
+          "Auckland",
+          "Bangkok",
+          "Buenos Aires",
+          "Cairo",
+          "Cape Town",
+          "Denver",
+          "Dubai",
+          "Honolulu",
+          "Houston",
+          "Jakarta",
+          "Lagos",
+          "Lima",
+          "London",
+          "Madrid",
+          "Mexico City",
+          "Moscow",
+          "Mumbai",
+          "Nairobi",
+          "Oslo",
+          "Perth",
+          "Phoenix",
+          "Reykjavik",
+          "Santiago",
+          "Seoul",
+          "Singapore",
+          "Sydney",
+          "Tokyo",
+          "Toronto",
+          "Vancouver"
+        ],
         "alerts": [
           {
             "city": "Auckland",

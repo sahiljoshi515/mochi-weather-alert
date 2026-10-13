@@ -207,8 +207,11 @@ export default async function page({ plugin }) {
     } else if (tool.name === "get_hourly") {
       controller.step("read", { detail: `Looking closer at ${parsed.city}` });
     } else if (tool.name === "report_alerts") {
+      const total = progress.cities ?? SNAPSHOT.cities.length;
+      const judged = Math.min(parsed.examined ?? total, total);
       const unavailable = parsed.unavailable ? `, ${parsed.unavailable} unavailable` : "";
-      controller.step("apply", { detail: `Reported ${parsed.alerts === 0 ? "no alerts" : `${parsed.alerts} alert${parsed.alerts === 1 ? "" : "s"}`}${unavailable}` });
+      const alerts = parsed.alerts === 0 ? "no alerts so far" : `${parsed.alerts} alert${parsed.alerts === 1 ? "" : "s"}`;
+      controller.step("apply", { detail: `${judged} of ${total} cities judged · ${alerts}${unavailable}`, progress: judged / total });
     }
   }
 

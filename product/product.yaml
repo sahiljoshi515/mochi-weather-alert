@@ -9,5 +9,5 @@ highlights:
 steps:
   - "Pick a day in the snapshot and your units"
   - "Add one to six rules like max_temp >= 95 or rain > 0.5"
-  - "The agent reads every city's day in one call and applies the rules: Mochi allows 6 agent steps per run, and this finishes in 4"
+  - "The agent reads every city's day in one call, then judges them ten cities at a time: Mochi allows 6 agent steps per run, and this uses 5"
   - "Get the cities that qualify, with their exact values, checked"

@@ -63,6 +63,9 @@ export function resultFromRun(request, outcome) {
   const listed = ok("list_cities").at(-1)?.data ?? null;
   const metric = {};
   for (const { data } of ok("get_daily")) for (const row of data.cities ?? []) metric[row.city] = row;
+  // The agent may skip list_cities (the instructions name the cities), so the city list falls back to
+  // what get_daily returned.
+  const known = listed?.cities ?? Object.values(metric).map((row) => ({ city: row.city, country: row.country, timezone: null, hours_available: row.hours }));
   const details = outcome.verdict?.details ?? {};
   const units = details.units ?? { temperature: request.temperature_unit, wind: request.wind_unit, rain: request.rain_unit };
   return {
@@ -75,7 +78,7 @@ export function resultFromRun(request, outcome) {
     verdict: outcome.verdict,
     answer: outcome.answer,
     expected: details.expected ?? null,
-    cities: (listed?.cities ?? []).map((row) => ({ ...row, metric: metric[row.city] ?? null })),
+    cities: known.map((row) => ({ ...row, metric: metric[row.city] ?? null })),
   };
 }
 
@@ -114,6 +117,8 @@ export function verdictWords(verdict, alerts, units) {
   }
   const details = verdict.details ?? {};
   const lines = [
+    details.unexamined?.length ? `It never judged: ${names(details.unexamined)}` : null,
+    details.unknown_examined?.length ? `Not in the data: ${names(details.unknown_examined)}` : null,
     details.missing_alerts?.length ? `It missed: ${names(details.missing_alerts)}` : null,
     details.extra_alerts?.length ? `It wrongly included: ${names(details.extra_alerts)}` : null,
     ...valueLines(details.value_mismatches, units).map((line) => `Wrong value for ${line}`),

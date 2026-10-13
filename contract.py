@@ -173,15 +173,23 @@ class HourlyOutput(Output):
 @dataclass
 class ReportInput(Output):
     date: Annotated[str, DATE]
-    alerts: Annotated[list[Alert], "Every city whose day satisfies the rules, at most 30; [] for none"]
-    unavailable: Annotated[list[Unavailable], "Every city with a missing hour for a variable the conditions use; [] for none"]
+    examined: Annotated[
+        list[Annotated[str, CITY]],
+        "The cities this call judges, 1 to 30 distinct: their earlier entries are replaced by this call's, and a "
+        "listed city with no entry has no alert. Every city in alerts or unavailable must be listed here",
+    ]
+    alerts: Annotated[list[Alert], "Every examined city whose day satisfies the rules; [] for none"]
+    unavailable: Annotated[
+        list[Unavailable], "Every examined city with a missing hour for a variable the conditions use; [] for none"
+    ]
 
 
 @dataclass
 class ReportOutput(Output):
     path: Annotated[str, "The report file, relative to the workspace: weather-alert/<date>.json"]
-    alerts: int
-    unavailable: int
+    alerts: Annotated[int, "Alert cities in the file after this call, over every call for the date"]
+    unavailable: Annotated[int, "Unavailable cities in the file after this call"]
+    examined: Annotated[int, "Cities examined so far, over every call for the date"]
 
 
 TOOLS = {

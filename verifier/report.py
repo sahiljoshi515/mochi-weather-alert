@@ -1,4 +1,4 @@
-"""report_alerts: a well-formed report at input, the saved file at output, and the comparison of a
+"""report_alerts: a well-formed call at input, the merged file at output, and the comparison of a
 report with the expected alerts that verify_task scores."""
 
 import json
@@ -9,7 +9,7 @@ from .checks import date_check, result
 from .rules import MAX_REPORT_ENTRIES, VARIABLES, parse_condition
 
 REPORT_DIR = "weather-alert"
-KINDS = ("alert", "unavailable")
+KEYS = {"date", "examined", "alerts", "unavailable"}
 
 
 def report_path(date):
@@ -21,9 +21,10 @@ def report_file(workspace, date):
 
 
 def plain(input_value):
-    """A ReportInput as the JSON report_alerts writes."""
+    """A ReportInput as JSON: one call's judgement."""
     return {
         "date": input_value.date,
+        "examined": list(input_value.examined),
         "alerts": [{"city": a.city, "values": dict(a.values), "matched": list(a.matched)} for a in input_value.alerts],
         "unavailable": [{"city": u.city, "variables": list(u.variables)} for u in input_value.unavailable],
     }
@@ -41,12 +42,18 @@ def is_number(value):
     return isinstance(value, int | float) and not isinstance(value, bool)
 
 
+def names_ok(names):
+    return isinstance(names, list) and all(isinstance(name, str) and name.strip() for name in names)
+
+
 def report_problem(report):
-    """What is wrong with a report's shape (a parsed JSON value), or None."""
-    if not isinstance(report, dict) or set(report) != {"date", "alerts", "unavailable"}:
-        return "the report must hold date, alerts and unavailable"
+    """What is wrong with a report's shape (one call's, or the merged file's, as parsed JSON), or None."""
+    if not isinstance(report, dict) or set(report) != KEYS:
+        return "the report must hold date, examined, alerts and unavailable"
     if not isinstance(report["date"], str):
         return "the report's date must be a string"
+    if not names_ok(report["examined"]) or len(set(report["examined"])) != len(report["examined"]):
+        return "examined must be a list of distinct city names"
     if not isinstance(report["alerts"], list) or not isinstance(report["unavailable"], list):
         return "alerts and unavailable must be lists"
     cities = []
@@ -78,19 +85,27 @@ def report_problem(report):
         cities.append(entry["city"])
     if len(set(cities)) != len(cities):
         return "a city may appear once, as an alert or as unavailable"
-    if len(cities) > MAX_REPORT_ENTRIES:
-        return f"a report names at most {MAX_REPORT_ENTRIES} cities"
+    outside = [city for city in cities if city not in set(report["examined"])]
+    if outside:
+        return f"{', '.join(outside)} must be listed in examined to be reported"
     return None
 
 
 def verify_input(value):
+    if not names_ok(value.examined) or not 1 <= len(value.examined) <= MAX_REPORT_ENTRIES:
+        return result(False, f"examined must name 1 to {MAX_REPORT_ENTRIES} distinct cities")
     problem = report_problem(plain(value))
     if problem:
         return result(False, problem)
     return date_check(value.date) or result(True, "input is valid")
 
 
+def entries_by_city(report):
+    return {entry["city"]: entry for entry in report["alerts"]}, {entry["city"]: entry for entry in report["unavailable"]}
+
+
 def verify_output(input_value, output_value, workspace):
+    """The merged file holds this call's judgement for every examined city, and the counts are the file's."""
     path = report_file(workspace, input_value.date)
     if output_value.path != report_path(input_value.date) or not path.is_file():
         return result(False, f"the report is not at {report_path(input_value.date)}")
@@ -98,11 +113,23 @@ def verify_output(input_value, output_value, workspace):
         saved = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
         return result(False, "the saved report is not JSON")
-    if saved != plain(input_value):
-        return result(False, "the saved report differs from the submitted alerts")
-    if (output_value.alerts, output_value.unavailable) != (len(input_value.alerts), len(input_value.unavailable)):
-        return result(False, "the counts differ from the submitted alerts")
-    return result(True, "report is saved", alerts=output_value.alerts, unavailable=output_value.unavailable)
+    problem = report_problem(saved)
+    if problem:
+        return result(False, f"the saved report is malformed: {problem}")
+    if saved["date"] != input_value.date:
+        return result(False, "the saved report is for another date")
+    if not set(input_value.examined) <= set(saved["examined"]):
+        return result(False, "the saved report does not record this call's examined cities")
+    given = plain(input_value)
+    saved_alerts, saved_unavailable = entries_by_city(saved)
+    given_alerts, given_unavailable = entries_by_city(given)
+    for city in input_value.examined:
+        if saved_alerts.get(city) != given_alerts.get(city) or saved_unavailable.get(city) != given_unavailable.get(city):
+            return result(False, f"the saved report does not hold this call's judgement of {city}")
+    counts = (len(saved["alerts"]), len(saved["unavailable"]), len(saved["examined"]))
+    if (output_value.alerts, output_value.unavailable, output_value.examined) != counts:
+        return result(False, "the counts differ from the saved report")
+    return result(True, "report is saved", alerts=output_value.alerts, unavailable=output_value.unavailable, examined=output_value.examined)
 
 
 def exact(value):

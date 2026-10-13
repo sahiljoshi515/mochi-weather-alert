@@ -1,5 +1,5 @@
 {
-  "note": "The exact report for 2026-07-07: Perth's humidity is a rounding tie (half up), Dubai's high sits exactly on its threshold.",
+  "note": "The exact report for 2026-07-07 in one report_alerts call: Perth's humidity is a rounding tie (half up), Dubai's high sits exactly on its threshold.",
   "task": "daily-alert",
   "arguments": {
     "date": "2026-07-07",
@@ -15,13 +15,6 @@
     ]
   },
   "steps": [
-    {
-      "tool": "list_cities",
-      "arguments": {
-        "date": "2026-07-07"
-      },
-      "save_as": "cities"
-    },
     {
       "tool": "get_daily",
       "arguments": {
@@ -64,6 +57,38 @@
       "tool": "report_alerts",
       "arguments": {
         "date": "2026-07-07",
+        "examined": [
+          "Athens",
+          "Auckland",
+          "Bangkok",
+          "Buenos Aires",
+          "Cairo",
+          "Cape Town",
+          "Denver",
+          "Dubai",
+          "Honolulu",
+          "Houston",
+          "Jakarta",
+          "Lagos",
+          "Lima",
+          "London",
+          "Madrid",
+          "Mexico City",
+          "Moscow",
+          "Mumbai",
+          "Nairobi",
+          "Oslo",
+          "Perth",
+          "Phoenix",
+          "Reykjavik",
+          "Santiago",
+          "Seoul",
+          "Singapore",
+          "Sydney",
+          "Tokyo",
+          "Toronto",
+          "Vancouver"
+        ],
         "alerts": [
           {
             "city": "Auckland",

@@ -163,15 +163,60 @@ def get_hourly(given: HourlyInput, workspace: Path) -> HourlyOutput:
     return HourlyOutput(city=city.name, date=date, timezone=city.timezone, rows=rows)
 
 
+def existing_report(path: Path, date: str) -> dict:
+    """The report already at ``path`` to merge into, or an empty one; a file that is not a report fails."""
+    if not path.is_file():
+        return {"date": date, "examined": [], "alerts": [], "unavailable": []}
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        found = None
+    keys = {"date", "examined", "alerts", "unavailable"}
+    if (
+        not isinstance(found, dict)
+        or set(found) != keys
+        or found["date"] != date
+        or not all(isinstance(found[key], list) for key in ("examined", "alerts", "unavailable"))
+        or not all(isinstance(entry, dict) and isinstance(entry.get("city"), str) for entry in found["alerts"] + found["unavailable"])
+    ):
+        raise ValueError(f"{report_path(date)} is not a report this tool can merge into; it was not written by report_alerts")
+    return found
+
+
 def report_alerts(given: ReportInput, workspace: Path) -> ReportOutput:
-    """Write the report as weather-alert/<date>.json, replacing an earlier one."""
+    """Merge this call's judgement into weather-alert/<date>.json: every examined city is restated by the
+    call (its earlier entries go, this call's entries come in; no entry means no alert), every other
+    city's entries are kept."""
     date = checked_date(given.date)
-    cities = [alert.city for alert in given.alerts] + [entry.city for entry in given.unavailable]
-    if len(set(cities)) != len(cities):
+    data = snapshot()
+    examined = given.examined
+    if not 1 <= len(examined) <= MAX_REPORT_ENTRIES or len(set(examined)) != len(examined):
+        raise ValueError(f"examined must name 1 to {MAX_REPORT_ENTRIES} distinct cities")
+    unknown = [name for name in examined if not any(city.name == name for city in data.cities)]
+    if unknown:
+        known = ", ".join(city.name for city in data.cities)
+        raise ValueError(f"unknown city {', '.join(unknown)}; the cities are {known}")
+    named = [alert.city for alert in given.alerts] + [entry.city for entry in given.unavailable]
+    if len(set(named)) != len(named):
         raise ValueError("a city may appear once, as an alert or as unavailable")
-    if len(cities) > MAX_REPORT_ENTRIES:
-        raise ValueError(f"a report names at most {MAX_REPORT_ENTRIES} cities")
+    outside = [name for name in named if name not in set(examined)]
+    if outside:
+        raise ValueError(f"{', '.join(outside)} must be listed in examined to be reported")
     path = workspace.resolve() / REPORT_DIR / f"{date}.json"
+    earlier = existing_report(path, date)
+    covered = set(examined)
+    given_plain = plain_output(given)
+    merged = {
+        "date": date,
+        "examined": [city.name for city in data.cities if city.name in covered | set(earlier["examined"])],
+        "alerts": [entry for entry in earlier["alerts"] if entry["city"] not in covered] + given_plain["alerts"],
+        "unavailable": [entry for entry in earlier["unavailable"] if entry["city"] not in covered] + given_plain["unavailable"],
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(plain_output(given), indent=2) + "\n", encoding="utf-8")
-    return ReportOutput(path=report_path(date), alerts=len(given.alerts), unavailable=len(given.unavailable))
+    path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    return ReportOutput(
+        path=report_path(date),
+        alerts=len(merged["alerts"]),
+        unavailable=len(merged["unavailable"]),
+        examined=len(merged["examined"]),
+    )

@@ -14,13 +14,6 @@
   },
   "steps": [
     {
-      "tool": "list_cities",
-      "arguments": {
-        "date": "2026-09-06"
-      },
-      "save_as": "cities"
-    },
-    {
       "tool": "get_daily",
       "arguments": {
         "cities": [
@@ -62,6 +55,18 @@
       "tool": "report_alerts",
       "arguments": {
         "date": "2026-09-06",
+        "examined": [
+          "Athens",
+          "Auckland",
+          "Bangkok",
+          "Buenos Aires",
+          "Cairo",
+          "Cape Town",
+          "Denver",
+          "Dubai",
+          "Honolulu",
+          "Houston"
+        ],
         "alerts": [
           {
             "city": "Buenos Aires",
@@ -82,7 +87,28 @@
             "matched": [
               "humidity >= 85"
             ]
-          },
+          }
+        ],
+        "unavailable": []
+      }
+    },
+    {
+      "tool": "report_alerts",
+      "arguments": {
+        "date": "2026-09-06",
+        "examined": [
+          "Jakarta",
+          "Lagos",
+          "Lima",
+          "London",
+          "Madrid",
+          "Mexico City",
+          "Moscow",
+          "Mumbai",
+          "Nairobi",
+          "Oslo"
+        ],
+        "alerts": [
           {
             "city": "Mumbai",
             "values": {
@@ -102,7 +128,28 @@
             "matched": [
               "min_temp < 50"
             ]
-          },
+          }
+        ],
+        "unavailable": []
+      }
+    },
+    {
+      "tool": "report_alerts",
+      "arguments": {
+        "date": "2026-09-06",
+        "examined": [
+          "Perth",
+          "Phoenix",
+          "Reykjavik",
+          "Santiago",
+          "Seoul",
+          "Singapore",
+          "Sydney",
+          "Tokyo",
+          "Toronto",
+          "Vancouver"
+        ],
+        "alerts": [
           {
             "city": "Reykjavik",
             "values": {

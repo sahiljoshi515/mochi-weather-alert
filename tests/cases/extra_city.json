@@ -16,13 +16,6 @@
   },
   "steps": [
     {
-      "tool": "list_cities",
-      "arguments": {
-        "date": "2026-07-07"
-      },
-      "save_as": "cities"
-    },
-    {
       "tool": "get_daily",
       "arguments": {
         "cities": [
@@ -64,6 +57,38 @@
       "tool": "report_alerts",
       "arguments": {
         "date": "2026-07-07",
+        "examined": [
+          "Athens",
+          "Auckland",
+          "Bangkok",
+          "Buenos Aires",
+          "Cairo",
+          "Cape Town",
+          "Denver",
+          "Dubai",
+          "Honolulu",
+          "Houston",
+          "Jakarta",
+          "Lagos",
+          "Lima",
+          "London",
+          "Madrid",
+          "Mexico City",
+          "Moscow",
+          "Mumbai",
+          "Nairobi",
+          "Oslo",
+          "Perth",
+          "Phoenix",
+          "Reykjavik",
+          "Santiago",
+          "Seoul",
+          "Singapore",
+          "Sydney",
+          "Tokyo",
+          "Toronto",
+          "Vancouver"
+        ],
         "alerts": [
           {
             "city": "Auckland",
