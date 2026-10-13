@@ -58,7 +58,19 @@ def test_runs_a_gold_path_over_stdio(tmp_path: Path) -> None:
         return report
 
     report = anyio.run(talk, tmp_path, script)
-    assert json.loads((tmp_path / "weather-alert" / f"{DATE}.json").read_text()) == report
+    saved = json.loads((tmp_path / "weather-alert" / f"{DATE}.json").read_text())
+    marker = json.loads((tmp_path / "weather-alert" / "run.json").read_text())
+    assert saved == {**report, "run": marker["run"]}
+    assert isinstance(marker["run"], str) and len(marker["run"]) == 16
+
+
+def test_the_server_writes_the_run_marker_when_it_starts(tmp_path: Path) -> None:
+    async def script(session):
+        return await session.list_tools()
+
+    anyio.run(talk, tmp_path, script)
+    marker = json.loads((tmp_path / "weather-alert" / "run.json").read_text())
+    assert isinstance(marker["run"], str) and marker["run"].strip() and "started" in marker
 
 
 @pytest.mark.network

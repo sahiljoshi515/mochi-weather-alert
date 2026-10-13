@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
 from fractions import Fraction
@@ -13,7 +14,7 @@ import pytest
 from slimconfig import build_output, plain_output
 
 from contract import AlertInput, CitiesInput, DailyInput, HourlyInput, ReportInput
-from plugin.alerts import get_daily, get_hourly, list_cities, pin_alerts, report_alerts
+from plugin.alerts import RUN, get_daily, get_hourly, list_cities, pin_alerts, report_alerts
 from plugin.data import snapshot
 from plugin.rules import aggregate
 
@@ -134,24 +135,46 @@ def saved(tmp_path: Path) -> dict:
     return json.loads((tmp_path / "weather-alert" / f"{DATE}.json").read_text())
 
 
-def test_report_alerts_merges_each_call_by_city(tmp_path: Path) -> None:
+def test_report_alerts_merges_each_call_by_city_and_counts_its_own_entries(tmp_path: Path) -> None:
     cairo = {"city": "Cairo", "values": {"max_temp": 98.0}, "matched": ["max_temp >= 95"]}
     first = report_alerts(report(DATE, NAMES[:10], alerts=[cairo]), tmp_path)
     assert first.path == f"weather-alert/{DATE}.json" and (first.alerts, first.unavailable, first.examined) == (1, 0, 10)
-    assert saved(tmp_path) == {"date": DATE, "examined": NAMES[:10], "alerts": [cairo], "unavailable": []}
+    marker = json.loads((tmp_path / "weather-alert" / "run.json").read_text())
+    assert marker["run"] == RUN
+    assert saved(tmp_path) == {"date": DATE, "run": RUN, "examined": NAMES[:10], "alerts": [cairo], "unavailable": []}
     lima = {"city": "Lima", "variables": ["rain"]}
     second = report_alerts(report(DATE, NAMES[10:20], unavailable=[lima]), tmp_path)
-    assert (second.alerts, second.unavailable, second.examined) == (1, 1, 20)
+    assert (second.alerts, second.unavailable, second.examined) == (0, 1, 10)  # this call's entries, not totals
     # a later call restates the cities it examines: Cairo's values replaced, nothing else touched
     fixed = {**cairo, "values": {"max_temp": 98.8}}
     third = report_alerts(report(DATE, NAMES[20:30] + ["Cairo"], alerts=[fixed]), tmp_path)
-    assert (third.alerts, third.unavailable, third.examined) == (1, 1, 30)
-    assert saved(tmp_path) == {"date": DATE, "examined": NAMES, "alerts": [fixed], "unavailable": [lima]}
+    assert (third.alerts, third.unavailable, third.examined) == (1, 0, 11)
+    assert saved(tmp_path) == {"date": DATE, "run": RUN, "examined": NAMES, "alerts": [fixed], "unavailable": [lima]}
     # an examined city with no entry has no alert: Cairo's goes; Lima turns from unavailable into an alert
     lima_alert = {"city": "Lima", "values": {"max_temp": 70.0}, "matched": []}
     fourth = report_alerts(report(DATE, ["Cairo", "Lima"], alerts=[lima_alert]), tmp_path)
-    assert (fourth.alerts, fourth.unavailable, fourth.examined) == (1, 0, 30)
+    assert (fourth.alerts, fourth.unavailable, fourth.examined) == (1, 0, 2)
     assert saved(tmp_path)["alerts"] == [lima_alert] and saved(tmp_path)["unavailable"] == []
+    assert sorted(path.name for path in (tmp_path / "weather-alert").iterdir()) == [f"{DATE}.json", "run.json"]
+
+
+@pytest.mark.parametrize(
+    "leftover",
+    [
+        "not json at all",
+        json.dumps({"date": DATE, "alerts": [{"city": "Lima", "values": {}, "matched": []}], "unavailable": []}),  # an older version's shape
+        json.dumps({"date": DATE, "run": "deadbeefdeadbeef", "examined": NAMES, "alerts": [{"city": "Lima", "values": {}, "matched": []}], "unavailable": []}),  # another run's
+        json.dumps({"date": "2026-07-01", "run": RUN, "examined": NAMES, "alerts": [], "unavailable": []}),  # another date's content
+    ],
+)
+def test_the_first_call_of_a_run_replaces_a_leftover_file(tmp_path: Path, leftover: str) -> None:
+    (tmp_path / "weather-alert").mkdir()
+    (tmp_path / "weather-alert" / f"{DATE}.json").write_text(leftover)
+    (tmp_path / "weather-alert" / "run.json").write_text(json.dumps({"run": "deadbeefdeadbeef"}))
+    out = report_alerts(report(DATE, ["Athens"]), tmp_path)
+    assert (out.alerts, out.unavailable, out.examined) == (0, 0, 1)
+    assert saved(tmp_path) == {"date": DATE, "run": RUN, "examined": ["Athens"], "alerts": [], "unavailable": []}
+    assert json.loads((tmp_path / "weather-alert" / "run.json").read_text())["run"] == RUN
 
 
 @pytest.mark.parametrize(
@@ -168,12 +191,16 @@ def test_report_alerts_merges_each_call_by_city(tmp_path: Path) -> None:
 def test_report_alerts_refuses_bad_calls(tmp_path: Path, examined, alerts, unavailable, error: str) -> None:
     with pytest.raises(ValueError, match=error):
         report_alerts(report(DATE, examined, alerts, unavailable), tmp_path)
-
-
-def test_report_alerts_refuses_a_foreign_file_and_bad_dates(tmp_path: Path) -> None:
-    (tmp_path / "weather-alert").mkdir()
-    (tmp_path / "weather-alert" / f"{DATE}.json").write_text("not a report")
-    with pytest.raises(ValueError, match="not a report"):
-        report_alerts(report(DATE, ["Athens"]), tmp_path)
     with pytest.raises(ValueError, match="outside the snapshot"):
         report_alerts(report("2027-01-01", ["Athens"]), tmp_path)
+
+
+def test_concurrent_calls_merge_without_losing_entries(tmp_path: Path) -> None:
+    """Several report_alerts calls of one turn run at once: every call's cities land in the file."""
+    chunks = [NAMES[start : start + 5] for start in range(0, 30, 5)]
+    calls = [report(DATE, chunk, alerts=[{"city": chunk[0], "values": {"max_temp": 90.0}, "matched": []}]) for chunk in chunks]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        outputs = list(pool.map(lambda call: report_alerts(call, tmp_path), calls))
+    assert all((out.alerts, out.examined) == (1, 5) for out in outputs)
+    final = saved(tmp_path)
+    assert final["examined"] == NAMES and sorted(a["city"] for a in final["alerts"]) == sorted(chunk[0] for chunk in chunks)

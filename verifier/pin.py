@@ -3,8 +3,8 @@
 import json
 
 from .checks import date_check, day_problem, names_problem, result
-from .report import compare, report_file, report_path, report_problem
-from .rules import Units, evaluate, metrics_from_plain, parse_conditions, plain_report
+from .report import NO_MARKER, compare, report_file, report_path, run_of
+from .rules import Units, evaluate, metrics_from_plain, parse_conditions, plain_report, report_problem
 
 
 def conditions_check(value):
@@ -99,16 +99,21 @@ def verify_task(arguments, reference, workspace):
         },
         "cities": len(reference.metric),
     }
+    run = run_of(workspace)
+    if run is None:
+        return result(False, NO_MARKER, score=0.0, **report)
     path = report_file(workspace, arguments.date)
     if not path.is_file():
         return result(False, f"no report at {report_path(arguments.date)}", score=0.0, **report)
     try:
         submitted = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
-        return result(False, f"{report_path(arguments.date)} is not JSON", score=0.0, **report)
+        return result(False, f"{report_path(arguments.date)} is not a report of this run: not JSON", score=0.0, **report)
     problem = report_problem(submitted)
     if problem:
-        return result(False, f"{report_path(arguments.date)}: {problem}", score=0.0, **report)
+        return result(False, f"{report_path(arguments.date)} is not a report of this run: {problem}", score=0.0, **report)
+    if submitted["run"] != run:
+        return result(False, f"{report_path(arguments.date)} is not a report of this run: it was left by an earlier one", score=0.0, **report)
     if submitted["date"] != arguments.date:
         return result(False, "the report is for another day", score=0.0, **report)
     cities = set(expected.examined)

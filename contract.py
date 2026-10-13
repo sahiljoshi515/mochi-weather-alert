@@ -187,9 +187,9 @@ class ReportInput(Output):
 @dataclass
 class ReportOutput(Output):
     path: Annotated[str, "The report file, relative to the workspace: weather-alert/<date>.json"]
-    alerts: Annotated[int, "Alert cities in the file after this call, over every call for the date"]
-    unavailable: Annotated[int, "Unavailable cities in the file after this call"]
-    examined: Annotated[int, "Cities examined so far, over every call for the date"]
+    alerts: Annotated[int, "This call's alert entries"]
+    unavailable: Annotated[int, "This call's unavailable entries"]
+    examined: Annotated[int, "This call's examined cities"]
 
 
 TOOLS = {

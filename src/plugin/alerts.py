@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
+import threading
+from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -37,9 +41,15 @@ from plugin.rules import (
     date_problem,
     evaluate,
     parse_conditions,
+    report_problem,
 )
 
 REPORT_DIR = "weather-alert"
+RUN_MARKER = "run.json"
+# This plugin process's run: the server records it in the workspace at its start, every report carries
+# it, and a report left by an earlier run (another token, or an older shape) is replaced, never merged.
+RUN = secrets.token_hex(8)
+LOCK = threading.Lock()
 MEAN_PLACES = Decimal("0.0001")
 
 
@@ -163,30 +173,54 @@ def get_hourly(given: HourlyInput, workspace: Path) -> HourlyOutput:
     return HourlyOutput(city=city.name, date=date, timezone=city.timezone, rows=rows)
 
 
-def existing_report(path: Path, date: str) -> dict:
-    """The report already at ``path`` to merge into, or an empty one; a file that is not a report fails."""
+def write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` through a temporary file and one rename, so a reader never sees a half-written file."""
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    temp.write_text(text, encoding="utf-8")
+    os.replace(temp, path)
+
+
+def run_marker_path(workspace: Path) -> Path:
+    return workspace.resolve() / REPORT_DIR / RUN_MARKER
+
+
+def write_run_marker(workspace: Path) -> str:
+    """Record this process's run token at weather-alert/run.json (the server does it when it starts)."""
+    path = run_marker_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(path, json.dumps({"run": RUN, "started": datetime.now(UTC).isoformat(timespec="seconds")}, indent=2) + "\n")
+    return RUN
+
+
+def marker_is_current(workspace: Path) -> bool:
+    path = run_marker_path(workspace)
     if not path.is_file():
-        return {"date": date, "examined": [], "alerts": [], "unavailable": []}
+        return False
     try:
         found = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
-        found = None
-    keys = {"date", "examined", "alerts", "unavailable"}
-    if (
-        not isinstance(found, dict)
-        or set(found) != keys
-        or found["date"] != date
-        or not all(isinstance(found[key], list) for key in ("examined", "alerts", "unavailable"))
-        or not all(isinstance(entry, dict) and isinstance(entry.get("city"), str) for entry in found["alerts"] + found["unavailable"])
-    ):
-        raise ValueError(f"{report_path(date)} is not a report this tool can merge into; it was not written by report_alerts")
+        return False
+    return isinstance(found, dict) and found.get("run") == RUN
+
+
+def mergeable_report(path: Path, date: str) -> dict | None:
+    """The report this run already wrote at ``path``, or None when there is none or the file is a
+    leftover (not a well-formed report, another date, or another run's): the call then starts afresh."""
+    if not path.is_file():
+        return None
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+    if report_problem(found) or found["date"] != date or found["run"] != RUN:
+        return None
     return found
 
 
 def report_alerts(given: ReportInput, workspace: Path) -> ReportOutput:
     """Merge this call's judgement into weather-alert/<date>.json: every examined city is restated by the
     call (its earlier entries go, this call's entries come in; no entry means no alert), every other
-    city's entries are kept."""
+    city's entries are kept. The merge is atomic per call; the counts returned are this call's own."""
     date = checked_date(given.date)
     data = snapshot()
     examined = given.examined
@@ -203,20 +237,18 @@ def report_alerts(given: ReportInput, workspace: Path) -> ReportOutput:
     if outside:
         raise ValueError(f"{', '.join(outside)} must be listed in examined to be reported")
     path = workspace.resolve() / REPORT_DIR / f"{date}.json"
-    earlier = existing_report(path, date)
     covered = set(examined)
     given_plain = plain_output(given)
-    merged = {
-        "date": date,
-        "examined": [city.name for city in data.cities if city.name in covered | set(earlier["examined"])],
-        "alerts": [entry for entry in earlier["alerts"] if entry["city"] not in covered] + given_plain["alerts"],
-        "unavailable": [entry for entry in earlier["unavailable"] if entry["city"] not in covered] + given_plain["unavailable"],
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
-    return ReportOutput(
-        path=report_path(date),
-        alerts=len(merged["alerts"]),
-        unavailable=len(merged["unavailable"]),
-        examined=len(merged["examined"]),
-    )
+    with LOCK:
+        if not marker_is_current(workspace):
+            write_run_marker(workspace)
+        earlier = mergeable_report(path, date) or {"date": date, "run": RUN, "examined": [], "alerts": [], "unavailable": []}
+        merged = {
+            "date": date,
+            "run": RUN,
+            "examined": [city.name for city in data.cities if city.name in covered | set(earlier["examined"])],
+            "alerts": [entry for entry in earlier["alerts"] if entry["city"] not in covered] + given_plain["alerts"],
+            "unavailable": [entry for entry in earlier["unavailable"] if entry["city"] not in covered] + given_plain["unavailable"],
+        }
+        write_atomic(path, json.dumps(merged, indent=2) + "\n")
+    return ReportOutput(path=report_path(date), alerts=len(given.alerts), unavailable=len(given.unavailable), examined=len(examined))

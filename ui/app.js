@@ -164,7 +164,7 @@ export default async function page({ plugin }) {
     if (run.busy) return;
     picker.set(args.date);
     if (!picker.valid() || !args.conditions.length) return;
-    progress = { request: args, cities: null, read: 0 };
+    progress = { request: args, cities: null, read: 0, judged: 0, alerts: 0, unavailable: 0 };
     if (shown && result.firstChild) result.classList.add("stale");
     else show(h("div", { class: "card large" }, skeleton({ lines: 3, block: true })));
     recent.select(null);
@@ -207,11 +207,15 @@ export default async function page({ plugin }) {
     } else if (tool.name === "get_hourly") {
       controller.step("read", { detail: `Looking closer at ${parsed.city}` });
     } else if (tool.name === "report_alerts") {
+      // Each call reports its own entries; the page adds them up (a city restated twice counts twice,
+      // so the count is capped at the city total).
       const total = progress.cities ?? SNAPSHOT.cities.length;
-      const judged = Math.min(parsed.examined ?? total, total);
-      const unavailable = parsed.unavailable ? `, ${parsed.unavailable} unavailable` : "";
-      const alerts = parsed.alerts === 0 ? "no alerts so far" : `${parsed.alerts} alert${parsed.alerts === 1 ? "" : "s"}`;
-      controller.step("apply", { detail: `${judged} of ${total} cities judged · ${alerts}${unavailable}`, progress: judged / total });
+      progress.judged = Math.min(progress.judged + (parsed.examined ?? 0), total);
+      progress.alerts += parsed.alerts ?? 0;
+      progress.unavailable += parsed.unavailable ?? 0;
+      const unavailable = progress.unavailable ? `, ${progress.unavailable} unavailable` : "";
+      const alerts = progress.alerts === 0 ? "no alerts so far" : `${progress.alerts} alert${progress.alerts === 1 ? "" : "s"}`;
+      controller.step("apply", { detail: `${progress.judged} of ${total} cities judged · ${alerts}${unavailable}`, progress: progress.judged / total });
     }
   }
 

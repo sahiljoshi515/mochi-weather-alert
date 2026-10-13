@@ -15,7 +15,7 @@ demands an exact match of the city set, every value and every matched rule.
 | `list_cities` | The 30 cities, each with its country, time zone and how many hours its local calendar day has on the date (23, 24 or 25); optional, since the task's instructions name the cities | `src/plugin/alerts.py` |
 | `get_daily` | Up to 30 cities' local-day aggregates on a date, so one call covers every city: highest and lowest temperature (°C), precipitation total (mm), highest wind (km/h), mean humidity (%), hour count and the variables with a missing hour | `src/plugin/alerts.py` |
 | `get_hourly` | One city's hourly rows over its local calendar day, in metric units; for inspecting one day (about 700 tokens), not the normal path | `src/plugin/alerts.py` |
-| `report_alerts` | Merges one call's judgement of up to 30 `examined` cities into `weather-alert/<date>.json`: the cities a call examines are restated by it (an examined city with no entry has no alert), every other city's entries are kept | `src/plugin/alerts.py` |
+| `report_alerts` | Merges one call's judgement of up to 30 `examined` cities into `weather-alert/<date>.json`: the cities a call examines are restated by it (an examined city with no entry has no alert), every other city's entries are kept; atomic per call, returns the call's own counts, and the first call of a run replaces any file an earlier run left | `src/plugin/alerts.py` |
 
 The tools return metric data only. Converting to the requested units, rounding
 and applying the rules is the agent's work. The outputs are compact: `list_cities`
@@ -45,6 +45,15 @@ replaces those cities' earlier entries and keeps every other city's. The final
 file must have examined all 30 cities. The instructions prescribe one
 `get_daily` with all 30 cities, then three `report_alerts` calls of 10 cities
 each, then the answer: 4 tool calls of the 6 steps the hosted runner allows.
+
+Each run is marked: the server writes `weather-alert/run.json` with a random
+token when it starts, every report it writes carries that token, and a report
+file found in the workspace without it (an earlier run's, or an older version's
+shape) is replaced by the run's first call rather than merged into. A model
+may issue several `report_alerts` calls in one turn, which NanoAgent runs at
+once: each merge is atomic (a lock in the process, a temporary file and one
+rename), the counts a call returns are its own entries, and its output check
+only asks that the file holds that call's judgement.
 
 ### Rules
 
@@ -107,7 +116,9 @@ The plugin's tools and the verifier never touch the network.
 
 `verifier/pin.py` recomputes the expected alerts from the pin's **metric**
 aggregates (never from the pin's own alert list) with the shared rules, then
-reads the merged report: every one of the pinned cities must be in its
+reads the merged report, which must carry this run's marker (a leftover of an
+earlier run or of an older version is refused as "not a report of this run"):
+every one of the pinned cities must be in its
 `examined` list (an unexamined city or a name that is not a city makes the
 verdict invalid, with the score scaled by the share of the pinned cities among
 the pinned and the examined ones), and the set of alert cities, each
@@ -120,9 +131,9 @@ missing, extra and mismatched entries. `verify_input` refuses malformed or
 duplicate conditions, bad dates and dates outside the snapshot, more than 30
 cities per `get_daily` call, and a `report_alerts` call that reports a city it
 did not examine; `verify_output` of `report_alerts` checks the merged file
-holds that call's judgement of every city it examined and that the counts are
-the file's, and that of `pin_alerts` checks the pin agrees with its own
-aggregates.
+is this run's and holds that call's judgement of every city it examined, with
+the counts being the call's own, and that of `pin_alerts` checks the pin agrees
+with its own aggregates.
 
 ### Limits
 
@@ -132,6 +143,8 @@ raise them. Converting and judging all 30 cities inside one reply overflowed
 that cap in hosted runs, which ended with no report. So the report is made in
 three `report_alerts` calls of 10 examined cities each, and the whole task takes
 4 tool calls: `get_daily` with every city, the three reports, then the answer.
+The instructions also tell the agent to keep each step brief, since a reply
+that reasons too long before its tool call is cut off and ends the run.
 
 ## Layout
 
@@ -198,5 +211,9 @@ The scripted cases in `tests/cases/` run the task as the hosted service does:
 cities, three `report_alerts` calls of 10 examined cities, the answer), `gold`
 reports in one call, `batched_daily` reads the cities in two `get_daily` calls
 after `list_cities`, `corrected` fixes an earlier call's wrong value and bogus
-alert in a later call, and `unexamined` stops after two of the three calls and
-is refused. The wrong cases each break the gold report in one way.
+alert in a later call, `overlapping_calls` restates five cities in two calls,
+`unexamined` stops after two of the three calls and is refused,
+`stale_old_version` and `stale_previous_run` plant a leftover report that the
+first call replaces, and `stale_no_calls` leaves an earlier run's report alone,
+which the verifier refuses. The wrong cases each break the gold report in one
+way.

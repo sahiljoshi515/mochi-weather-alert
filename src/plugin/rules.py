@@ -294,7 +294,8 @@ def evaluate(metrics: list[DayMetrics], conditions: list[Condition], match: str,
 
 
 def plain_report(date: str, expected: Expected) -> dict:
-    """``expected`` as the report file's JSON: what report_alerts writes for a perfect answer."""
+    """``expected`` as the report's JSON (without the run marker report_alerts adds): what a perfect
+    answer says."""
     return {
         "date": date,
         "examined": list(expected.examined),
@@ -304,3 +305,77 @@ def plain_report(date: str, expected: Expected) -> dict:
         ],
         "unavailable": [{"city": city, "variables": list(variables)} for city, variables in expected.unavailable.items()],
     }
+
+
+# ----- The report file -----
+
+REPORT_KEYS = ("date", "run", "examined", "alerts", "unavailable")
+
+
+def canonical_conditions(texts: list[str]) -> list[str]:
+    """The conditions' canonical forms, or ValueError when one is malformed or two mean the same."""
+    found = [parse_condition(text).text for text in texts]
+    if len(set(found)) != len(found):
+        raise ValueError("a condition is listed twice")
+    return found
+
+
+def is_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def names_ok(names: object) -> bool:
+    return isinstance(names, list) and all(isinstance(name, str) and name.strip() for name in names)
+
+
+def entries_problem(examined: object, alerts: object, unavailable: object) -> str | None:
+    """What is wrong with a judgement's three lists (one call's, or the whole file's), or None."""
+    if not names_ok(examined) or len(set(examined)) != len(examined):
+        return "examined must be a list of distinct city names"
+    if not isinstance(alerts, list) or not isinstance(unavailable, list):
+        return "alerts and unavailable must be lists"
+    cities = []
+    for alert in alerts:
+        if not isinstance(alert, dict) or set(alert) != {"city", "values", "matched"}:
+            return "each alert must hold city, values and matched"
+        if not isinstance(alert["city"], str) or not alert["city"].strip():
+            return "an alert's city must be a city name"
+        values = alert["values"]
+        if not isinstance(values, dict) or not all(key in VARIABLES and is_number(value) for key, value in values.items()):
+            return f"{alert['city']}: values must map condition variables to numbers"
+        if not isinstance(alert["matched"], list) or not all(isinstance(text, str) for text in alert["matched"]):
+            return f"{alert['city']}: matched must be a list of conditions"
+        try:
+            canonical_conditions(alert["matched"])
+        except ValueError as error:
+            return f"{alert['city']}: matched: {error}"
+        cities.append(alert["city"])
+    for entry in unavailable:
+        if not isinstance(entry, dict) or set(entry) != {"city", "variables"}:
+            return "each unavailable entry must hold city and variables"
+        if not isinstance(entry["city"], str) or not entry["city"].strip():
+            return "an unavailable entry's city must be a city name"
+        variables = entry["variables"]
+        if not isinstance(variables, list) or not variables or not all(name in VARIABLES for name in variables):
+            return f"{entry['city']}: variables must name the condition variables the city lacks"
+        if len(set(variables)) != len(variables):
+            return f"{entry['city']}: variables must be distinct"
+        cities.append(entry["city"])
+    if len(set(cities)) != len(cities):
+        return "a city may appear once, as an alert or as unavailable"
+    outside = [city for city in cities if city not in set(examined)]
+    if outside:
+        return f"{', '.join(outside)} must be listed in examined to be reported"
+    return None
+
+
+def report_problem(report: object) -> str | None:
+    """What is wrong with a report file's shape (as parsed JSON), or None: the keys, a date, the run
+    marker of the process that wrote it, and well-formed lists."""
+    if not isinstance(report, dict) or set(report) != set(REPORT_KEYS):
+        return "the report must hold date, run, examined, alerts and unavailable"
+    if not isinstance(report["date"], str):
+        return "the report's date must be a string"
+    if not isinstance(report["run"], str) or not report["run"].strip():
+        return "the report's run must be the marker of the run that wrote it"
+    return entries_problem(report["examined"], report["alerts"], report["unavailable"])

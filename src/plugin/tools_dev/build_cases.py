@@ -8,9 +8,12 @@ then report_alerts three times with 10 examined cities each (so a hosted model c
 per step, inside its 2,048-token reply cap), then the answer: 4 tool calls of Mochi's 6 steps.
 gold does it in one report_alerts call, gold_chunked in three, batched_daily reads the cities in
 two get_daily calls after list_cities, corrected fixes an earlier chunk's mistakes in a later call,
-and unexamined stops after two chunks. Each wrong case breaks the gold report in one way the plan
-lists as adversarial. Every expected verdict is checked here with the real verifier, the report
-steps applied through report_alerts itself, before the case is written.
+unexamined stops after two chunks, overlapping_calls restates five cities in two chunks,
+stale_old_version and stale_previous_run plant a leftover file that the first call must replace, and
+stale_no_calls leaves an earlier run's report alone, which the verifier must refuse. Each wrong case
+breaks the gold report in one way the plan lists as adversarial. Every expected verdict is checked
+here with the real verifier, the run marked and the report steps applied through report_alerts
+itself, before the case is written.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from slimconfig import build_output, plain_output
 
 import verifier
 from contract import AlertInput, HourlyInput, PinOutput, ReportInput
-from plugin.alerts import get_hourly, pin_alerts, report_alerts
+from plugin.alerts import get_hourly, pin_alerts, report_alerts, write_run_marker
 from plugin.data import snapshot
 from plugin.rules import (
     MAX_CITIES_PER_CALL,
@@ -91,10 +94,15 @@ def read_steps(date: str, batch: int = MAX_CITIES_PER_CALL, list_first: bool = F
 
 
 def verdict(arguments: dict, pinned: PinOutput, steps: list[dict]) -> dict:
-    """The real verifier's verdict after the report steps are applied through report_alerts itself."""
+    """The real verifier's verdict after the steps are applied as the host applies them: the server
+    marks the run at its start, python steps act behind the tools' back, report steps go through
+    report_alerts itself."""
     workspace = Path(tempfile.mkdtemp())
+    write_run_marker(workspace)
     for step in steps:
-        if step.get("tool") == "report_alerts" and not step.get("expect_error"):
+        if "python" in step:
+            exec(step["python"], {"workspace": workspace, "outputs": {}, "json": json, "Path": Path})  # noqa: S102 - the case's own step
+        elif step.get("tool") == "report_alerts" and not step.get("expect_error"):
             report_alerts(build_output(step["arguments"], ReportInput), workspace)
     return verifier.verify_task(TASK, build_output(arguments, AlertInput), build_output(plain_output(pinned), PinOutput), str(workspace))
 
@@ -213,6 +221,25 @@ def main() -> int:
     chunks = report_steps(gold, CHUNKS)
     write_case("unexamined", "Only two of the three report_alerts calls: ten cities are never examined.",
                arguments, pinned, read + chunks[:2], expect={"valid": False, "message_contains": "unexamined", "score_max": 0.7}, answer=summary(gold))
+
+    # overlapping calls: the second chunk restates five cities of the first with the same judgement
+    everyone = gold["examined"]
+    overlapping = [chunk_report(gold, everyone[0:10]), chunk_report(gold, everyone[5:20]), chunk_report(gold, everyone[20:30])]
+    write_case("overlapping_calls", "Three report_alerts calls whose second one restates five cities of the first: merged in sequence, the file is still exact.",
+               arguments, pinned, read + [{"tool": "report_alerts", "arguments": part} for part in overlapping], expect=valid, answer=summary(gold))
+
+    # stale files: the member's folder persists across runs, so a leftover report may sit in the workspace
+    plant = "(workspace / 'weather-alert').mkdir(exist_ok=True); (workspace / 'weather-alert' / '{date}.json').write_text(json.dumps({content}))"
+    old_shape = {"date": date, "alerts": [{"city": "Lima", "values": {"max_temp": 1.0}, "matched": []}], "unavailable": []}
+    write_case("stale_old_version", "An older version's report (no run marker, no examined list) lies in the workspace: the first report_alerts call replaces it.",
+               arguments, pinned, read + [{"python": plant.format(date=date, content=json.dumps(old_shape))}] + report_steps(gold, CHUNKS), expect=valid, answer=summary(gold))
+    previous = {**gold, "run": "deadbeefdeadbeef"}
+    write_case("stale_previous_run", "A complete, correct report of an EARLIER run lies in the workspace and this run judges only 20 cities: the leftover is replaced, not inherited, so ten cities are unexamined.",
+               arguments, pinned, read + [{"python": plant.format(date=date, content=json.dumps(previous))}] + chunks[:2],
+               expect={"valid": False, "message_contains": "unexamined", "score_max": 0.7}, answer=summary(gold))
+    write_case("stale_no_calls", "A complete, correct report of an earlier run lies in the workspace and the agent never calls report_alerts: the verifier refuses the leftover.",
+               arguments, pinned, read + [{"python": plant.format(date=date, content=json.dumps(previous))}],
+               expect={"valid": False, "message_contains": "not a report of this run", "score_max": 0.0}, answer=summary(gold))
 
     # corrected: the first chunk gets one value wrong and alerts a city that does not qualify; the last
     # chunk examines both again, with the right values for one and no entry for the other

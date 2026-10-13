@@ -6,10 +6,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from .checks import date_check, result
-from .rules import MAX_REPORT_ENTRIES, VARIABLES, parse_condition
+from .rules import MAX_REPORT_ENTRIES, canonical_conditions, entries_problem, names_ok, report_problem
 
 REPORT_DIR = "weather-alert"
-KEYS = {"date", "examined", "alerts", "unavailable"}
+RUN_MARKER = "run.json"
 
 
 def report_path(date):
@@ -18,6 +18,22 @@ def report_path(date):
 
 def report_file(workspace, date):
     return Path(workspace) / REPORT_DIR / f"{date}.json"
+
+
+def run_of(workspace):
+    """The run marker the plugin process wrote at its start (weather-alert/run.json), or None."""
+    path = Path(workspace) / REPORT_DIR / RUN_MARKER
+    if not path.is_file():
+        return None
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+    run = found.get("run") if isinstance(found, dict) else None
+    return run if isinstance(run, str) and run.strip() else None
+
+
+NO_MARKER = "no run marker in the workspace: the plugin did not start here"
 
 
 def plain(input_value):
@@ -30,71 +46,10 @@ def plain(input_value):
     }
 
 
-def canonical_conditions(texts):
-    """The conditions' canonical forms, or ValueError when one is malformed or two mean the same."""
-    found = [parse_condition(text).text for text in texts]
-    if len(set(found)) != len(found):
-        raise ValueError("a condition is listed twice")
-    return found
-
-
-def is_number(value):
-    return isinstance(value, int | float) and not isinstance(value, bool)
-
-
-def names_ok(names):
-    return isinstance(names, list) and all(isinstance(name, str) and name.strip() for name in names)
-
-
-def report_problem(report):
-    """What is wrong with a report's shape (one call's, or the merged file's, as parsed JSON), or None."""
-    if not isinstance(report, dict) or set(report) != KEYS:
-        return "the report must hold date, examined, alerts and unavailable"
-    if not isinstance(report["date"], str):
-        return "the report's date must be a string"
-    if not names_ok(report["examined"]) or len(set(report["examined"])) != len(report["examined"]):
-        return "examined must be a list of distinct city names"
-    if not isinstance(report["alerts"], list) or not isinstance(report["unavailable"], list):
-        return "alerts and unavailable must be lists"
-    cities = []
-    for alert in report["alerts"]:
-        if not isinstance(alert, dict) or set(alert) != {"city", "values", "matched"}:
-            return "each alert must hold city, values and matched"
-        if not isinstance(alert["city"], str) or not alert["city"].strip():
-            return "an alert's city must be a city name"
-        values = alert["values"]
-        if not isinstance(values, dict) or not all(key in VARIABLES and is_number(value) for key, value in values.items()):
-            return f"{alert['city']}: values must map condition variables to numbers"
-        if not isinstance(alert["matched"], list) or not all(isinstance(text, str) for text in alert["matched"]):
-            return f"{alert['city']}: matched must be a list of conditions"
-        try:
-            canonical_conditions(alert["matched"])
-        except ValueError as error:
-            return f"{alert['city']}: matched: {error}"
-        cities.append(alert["city"])
-    for entry in report["unavailable"]:
-        if not isinstance(entry, dict) or set(entry) != {"city", "variables"}:
-            return "each unavailable entry must hold city and variables"
-        if not isinstance(entry["city"], str) or not entry["city"].strip():
-            return "an unavailable entry's city must be a city name"
-        variables = entry["variables"]
-        if not isinstance(variables, list) or not variables or not all(name in VARIABLES for name in variables):
-            return f"{entry['city']}: variables must name the condition variables the city lacks"
-        if len(set(variables)) != len(variables):
-            return f"{entry['city']}: variables must be distinct"
-        cities.append(entry["city"])
-    if len(set(cities)) != len(cities):
-        return "a city may appear once, as an alert or as unavailable"
-    outside = [city for city in cities if city not in set(report["examined"])]
-    if outside:
-        return f"{', '.join(outside)} must be listed in examined to be reported"
-    return None
-
-
 def verify_input(value):
     if not names_ok(value.examined) or not 1 <= len(value.examined) <= MAX_REPORT_ENTRIES:
         return result(False, f"examined must name 1 to {MAX_REPORT_ENTRIES} distinct cities")
-    problem = report_problem(plain(value))
+    problem = entries_problem(value.examined, plain(value)["alerts"], plain(value)["unavailable"])
     if problem:
         return result(False, problem)
     return date_check(value.date) or result(True, "input is valid")
@@ -105,19 +60,23 @@ def entries_by_city(report):
 
 
 def verify_output(input_value, output_value, workspace):
-    """The merged file holds this call's judgement for every examined city, and the counts are the file's."""
+    """The merged file is a report of this run and holds this call's judgement of every city it examined.
+    Nothing cumulative is checked: other calls of the same turn may have merged more since."""
     path = report_file(workspace, input_value.date)
     if output_value.path != report_path(input_value.date) or not path.is_file():
         return result(False, f"the report is not at {report_path(input_value.date)}")
+    run = run_of(workspace)
+    if run is None:
+        return result(False, NO_MARKER)
     try:
         saved = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
-        return result(False, "the saved report is not JSON")
+        return result(False, f"{report_path(input_value.date)} is not a report of this run: not JSON")
     problem = report_problem(saved)
     if problem:
-        return result(False, f"the saved report is malformed: {problem}")
-    if saved["date"] != input_value.date:
-        return result(False, "the saved report is for another date")
+        return result(False, f"{report_path(input_value.date)} is not a report of this run: {problem}")
+    if saved["date"] != input_value.date or saved["run"] != run:
+        return result(False, f"{report_path(input_value.date)} is not a report of this run")
     if not set(input_value.examined) <= set(saved["examined"]):
         return result(False, "the saved report does not record this call's examined cities")
     given = plain(input_value)
@@ -126,10 +85,10 @@ def verify_output(input_value, output_value, workspace):
     for city in input_value.examined:
         if saved_alerts.get(city) != given_alerts.get(city) or saved_unavailable.get(city) != given_unavailable.get(city):
             return result(False, f"the saved report does not hold this call's judgement of {city}")
-    counts = (len(saved["alerts"]), len(saved["unavailable"]), len(saved["examined"]))
+    counts = (len(input_value.alerts), len(input_value.unavailable), len(input_value.examined))
     if (output_value.alerts, output_value.unavailable, output_value.examined) != counts:
-        return result(False, "the counts differ from the saved report")
-    return result(True, "report is saved", alerts=output_value.alerts, unavailable=output_value.unavailable, examined=output_value.examined)
+        return result(False, "the counts are not this call's entries")
+    return result(True, "report is saved", alerts=counts[0], unavailable=counts[1], examined=counts[2])
 
 
 def exact(value):

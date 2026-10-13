@@ -11,7 +11,7 @@ from slimconfig import build_output, plain_output
 
 import verifier
 from contract import AlertInput, PinOutput, ReportInput
-from plugin.alerts import pin_alerts, report_alerts
+from plugin.alerts import pin_alerts, report_alerts, write_run_marker
 from plugin.rules import plain_report
 from verifier.pin import expected_of
 
@@ -20,7 +20,7 @@ CASES = sorted((Path(__file__).resolve().parent / "cases").glob("*.json"))
 
 def test_there_are_gold_and_wrong_cases() -> None:
     names = {case.stem for case in CASES}
-    assert {"gold", "gold_chunked", "gold_dst", "batched_daily", "corrected", "unexamined", "wrong_unit", "bankers_rounding", "boundary", "missing_city", "any_vs_all", "extra_city", "no_report", "dst_utc_day"} <= names
+    assert {"gold", "gold_chunked", "gold_dst", "batched_daily", "corrected", "unexamined", "overlapping_calls", "stale_old_version", "stale_previous_run", "stale_no_calls", "wrong_unit", "bankers_rounding", "boundary", "missing_city", "any_vs_all", "extra_city", "no_report", "dst_utc_day"} <= names
 
 
 def by_city(entries):
@@ -39,9 +39,13 @@ def test_each_case_expects_the_verifiers_verdict(case_file: Path, tmp_path: Path
     assert len(tool_steps) <= 5, "every case leaves room for the answer within Mochi's 6 steps"
     if case_file.stem in ("gold_chunked", "gold_dst"):
         assert [step["tool"] for step in tool_steps] == ["get_daily", "report_alerts", "report_alerts", "report_alerts"]
-    # the report steps go through report_alerts itself, so the merge is what the harness exercises
-    for step in tool_steps:
-        if step["tool"] == "report_alerts":
+    # as the host does: the server marks the run at its start, python steps act behind the tools' back,
+    # and the report steps go through report_alerts itself, so the merge is what is exercised
+    write_run_marker(tmp_path)
+    for step in case["steps"]:
+        if "python" in step:
+            exec(step["python"], {"workspace": tmp_path, "outputs": {}, "json": json, "Path": Path})  # noqa: S102 - the case's own step
+        elif step.get("tool") == "report_alerts" and not step.get("expect_error"):
             report_alerts(build_output(step["arguments"], ReportInput), tmp_path)
     found = verifier.verify_task("daily-alert", arguments, build_output(plain_output(pinned), PinOutput), str(tmp_path))
     expect = case["expect"]
@@ -54,5 +58,5 @@ def test_each_case_expects_the_verifiers_verdict(case_file: Path, tmp_path: Path
         assert found["score"] <= expect["score_max"]
     if expect["valid"]:
         saved = json.loads((tmp_path / "weather-alert" / f"{case['arguments']['date']}.json").read_text())
-        assert saved["examined"] == gold["examined"]
+        assert saved["examined"] == gold["examined"] and saved["run"] == json.loads((tmp_path / "weather-alert" / "run.json").read_text())["run"]
         assert by_city(saved["alerts"]) == by_city(gold["alerts"]) and by_city(saved["unavailable"]) == by_city(gold["unavailable"])
