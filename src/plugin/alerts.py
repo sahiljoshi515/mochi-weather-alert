@@ -28,7 +28,16 @@ from contract import (
     Unavailable,
 )
 from plugin.data import snapshot
-from plugin.rules import MAX_CITIES_PER_CALL, DayMetrics, Units, aggregate, date_problem, evaluate, parse_conditions
+from plugin.rules import (
+    MAX_CITIES_PER_CALL,
+    MAX_REPORT_ENTRIES,
+    DayMetrics,
+    Units,
+    aggregate,
+    date_problem,
+    evaluate,
+    parse_conditions,
+)
 
 REPORT_DIR = "weather-alert"
 MEAN_PLACES = Decimal("0.0001")
@@ -94,7 +103,9 @@ def list_cities(given: CitiesInput, workspace: Path) -> CitiesOutput:
     return CitiesOutput(
         date=date,
         cities=[
-            CityDay(city=city.name, country=city.country, timezone=city.timezone, hours=len(data.day(city.name, date)))
+            CityDay(
+                city=city.name, country=city.country, timezone=city.timezone, hours_available=len(data.day(city.name, date))
+            )
             for city in data.cities
         ],
     )
@@ -158,6 +169,8 @@ def report_alerts(given: ReportInput, workspace: Path) -> ReportOutput:
     cities = [alert.city for alert in given.alerts] + [entry.city for entry in given.unavailable]
     if len(set(cities)) != len(cities):
         raise ValueError("a city may appear once, as an alert or as unavailable")
+    if len(cities) > MAX_REPORT_ENTRIES:
+        raise ValueError(f"a report names at most {MAX_REPORT_ENTRIES} cities")
     path = workspace.resolve() / REPORT_DIR / f"{date}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(plain_output(given), indent=2) + "\n", encoding="utf-8")

@@ -12,13 +12,24 @@ demands an exact match of the city set, every value and every matched rule.
 | Tool | Does | Code |
 |---|---|---|
 | `pin_alerts` | Every city's local day in metric units (the exact ingredients of each value) plus the alerts and unavailable cities the rules give; the task's pinned reference | `src/plugin/alerts.py` |
-| `list_cities` | The 30 cities, each with how many hours its local calendar day has on the date (23, 24 or 25) | `src/plugin/alerts.py` |
-| `get_daily` | Up to 10 cities' local-day aggregates on a date: highest and lowest temperature (°C), precipitation total (mm), highest wind (km/h), mean humidity (%), hour count and the variables with a missing hour | `src/plugin/alerts.py` |
-| `get_hourly` | One city's hourly rows over its local calendar day, in metric units | `src/plugin/alerts.py` |
-| `report_alerts` | Writes the answer to `weather-alert/<date>.json`, replacing an earlier one | `src/plugin/alerts.py` |
+| `list_cities` | The 30 cities, each with its country, time zone and how many hours its local calendar day has on the date (23, 24 or 25) | `src/plugin/alerts.py` |
+| `get_daily` | Up to 30 cities' local-day aggregates on a date, so one call covers every city: highest and lowest temperature (°C), precipitation total (mm), highest wind (km/h), mean humidity (%), hour count and the variables with a missing hour | `src/plugin/alerts.py` |
+| `get_hourly` | One city's hourly rows over its local calendar day, in metric units; for inspecting one day (about 700 tokens), not the normal path | `src/plugin/alerts.py` |
+| `report_alerts` | Writes the whole answer, at most 30 cities, to `weather-alert/<date>.json`, replacing an earlier one | `src/plugin/alerts.py` |
 
 The tools return metric data only. Converting to the requested units, rounding
-and applying the rules is the agent's work.
+and applying the rules is the agent's work. The outputs are compact: `list_cities`
+is about 800 tokens and `get_daily` with all 30 cities about 1,600, so an agent
+reads the whole day in two calls; `get_hourly` is for inspecting one city's day.
+
+### Limits
+
+Mochi's hosted runner allows an agent 6 steps per run, 2,048 output tokens per
+step and a $0.10 budget, and members cannot raise them. The task is designed to
+finish in 4 steps: `list_cities`, `get_daily` with every city, `report_alerts`,
+then the answer. A report naming all 30 cities under six rules on five variables
+is about 1,900 tokens, close to the per-step output cap; typical rule sets are far
+smaller.
 
 ### The task
 
@@ -96,7 +107,7 @@ cities, an entry counting only when it is exactly right) against the expected
 ones; the verdict is valid only at an exact match. Details give the expected
 report and the missing, extra and mismatched entries. `verify_input` refuses
 malformed or duplicate conditions, bad dates and dates outside the snapshot,
-and more than 10 cities per `get_daily` call; `verify_output` of
+and more than 30 cities per `get_daily` call; `verify_output` of
 `report_alerts` checks the saved file equals the submitted report, and that of
 `pin_alerts` checks the pin agrees with its own aggregates.
 
@@ -139,9 +150,29 @@ From the NanoAgent repository root:
 .venv/bin/nanoagent plugin inspect plugins/weather-alert
 ```
 
+The page cannot be opened without a host, so check it two ways before shipping:
+`node --check ui/*.js` for syntax, and the lab's page check, which evaluates every
+`ui/*.js` module together with the served kit under Node and catches what a
+syntax check misses (duplicate exports, bad imports, a module that crashes at
+load); every line must say OK:
+
+```bash
+bash ~/mochi-dev/harness/page_check.sh .
+```
+
+`uv run pytest` runs the same check when that script is present, and always
+imports `ui/grammar.js` under Node to compare the page's rule grammar with the
+Python one.
+
 To refetch the snapshot (network) and rebuild the harness cases from it:
 
 ```bash
 uv run python src/plugin/tools_dev/fetch_snapshot.py
 uv run python src/plugin/tools_dev/build_cases.py
 ```
+
+The scripted cases in `tests/cases/` run the task as the hosted service does:
+Mochi's runner allows 6 agent steps per run, so the gold cases take the 4-step
+path (`list_cities`, one `get_daily` with all 30 cities, `report_alerts`, the
+answer); `batched_daily` reads the cities in two `get_daily` calls to show that
+batching still works.

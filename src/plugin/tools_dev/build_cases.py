@@ -3,7 +3,8 @@
     uv run python src/plugin/tools_dev/build_cases.py
 
 Each case is what ~/mochi-dev/harness/scripted_task.py runs: the task's arguments, the scripted
-agent's steps (list_cities, get_daily in batches of 10, report_alerts) and the expected verdict.
+agent's steps (list_cities, one get_daily with every city, report_alerts: the 4-step path Mochi's
+6-step cap leaves room for; batched_daily reads the cities in two calls) and the expected verdict.
 The gold cases report exactly what the rules give; each wrong case breaks the gold report in one
 way the plan lists as adversarial. The verdict every case expects is checked here with the real
 verifier before the case is written.
@@ -62,17 +63,17 @@ def verdict(arguments: dict, pinned: PinOutput, report: dict | None) -> dict:
     )
 
 
-def steps(arguments: dict, report: dict | None) -> list[dict]:
+def steps(arguments: dict, report: dict | None, batch: int = MAX_CITIES_PER_CALL) -> list[dict]:
     names = [city.name for city in snapshot().cities]
     found = [{"tool": "list_cities", "arguments": {"date": arguments["date"]}, "save_as": "cities"}]
-    for start in range(0, len(names), MAX_CITIES_PER_CALL):
-        found.append({"tool": "get_daily", "arguments": {"cities": names[start : start + MAX_CITIES_PER_CALL], "date": arguments["date"]}})
+    for start in range(0, len(names), batch):
+        found.append({"tool": "get_daily", "arguments": {"cities": names[start : start + batch], "date": arguments["date"]}})
     if report is not None:
         found.append({"tool": "report_alerts", "arguments": report})
     return found
 
 
-def write_case(name: str, note: str, arguments: dict, pinned: PinOutput, report: dict | None, *, expect: dict, answer: str, extra_steps: list | None = None) -> None:
+def write_case(name: str, note: str, arguments: dict, pinned: PinOutput, report: dict | None, *, expect: dict, answer: str, extra_steps: list | None = None, batch: int = MAX_CITIES_PER_CALL) -> None:
     found = verdict(arguments, pinned, report)
     if found["valid"] != expect["valid"]:
         raise RuntimeError(f"{name}: the verifier says valid={found['valid']}, the case expects {expect['valid']}: {found['message']}")
@@ -86,7 +87,7 @@ def write_case(name: str, note: str, arguments: dict, pinned: PinOutput, report:
         "note": note,
         "task": TASK,
         "arguments": arguments,
-        "steps": steps(arguments, report) + (extra_steps or []),
+        "steps": steps(arguments, report, batch) + (extra_steps or []),
         "answer": answer,
         "expect": expect,
     }
@@ -181,6 +182,8 @@ def main() -> int:
     print(f"gold day {arguments['date']}: rules {arguments['conditions']}; tie city {tie_city}; boundary city {boundary_city}; {len(gold['alerts'])} alerts")
     write_case("gold", f"The exact report for {arguments['date']}: {tie_city}'s humidity is a rounding tie (half up), {boundary_city}'s high sits exactly on its threshold.",
                arguments, pinned, gold, expect={"valid": True, "score_min": 1.0}, answer=summary(gold))
+    write_case("batched_daily", "The exact report, with the cities read in two get_daily calls of 15 instead of one.",
+               arguments, pinned, gold, expect={"valid": True, "score_min": 1.0}, answer=summary(gold), batch=15)
 
     def alert(report: dict, city: str) -> dict:
         return next(a for a in report["alerts"] if a["city"] == city)

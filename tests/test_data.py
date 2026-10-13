@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from plugin.data import DATA, snapshot
-from plugin.rules import SNAPSHOT_END, SNAPSHOT_START, SOURCE_VARIABLES, parse_condition
+from plugin.rules import MAX_REPORT_ENTRIES, SNAPSHOT_END, SNAPSHOT_START, SOURCE_VARIABLES, parse_condition
 
 ROOT = Path(__file__).resolve().parents[1]
 DAYS = 92
@@ -26,7 +26,7 @@ def test_the_verifier_and_the_server_share_one_rules_module() -> None:
 def test_the_snapshot_covers_every_city_and_day() -> None:
     data = snapshot()
     names = [city.name for city in data.cities]
-    assert len(names) == 30 and names == sorted(names) and len(set(names)) == 30
+    assert len(names) == 30 == MAX_REPORT_ENTRIES and names == sorted(names) and len(set(names)) == 30
     assert {"Santiago", "Auckland"} <= set(names)
     lengths = Counter()
     for city in data.cities:
@@ -125,3 +125,17 @@ def test_the_page_grammar_agrees_with_the_python_grammar() -> None:
             expected.append(None)
     assert found[: len(SAMPLES)] == expected
     assert found[len(SAMPLES)] == "That rule means the same as rain > 0." and found[len(SAMPLES) + 1] is None
+
+
+PAGE_CHECK = Path.home() / "mochi-dev" / "harness" / "page_check.sh"
+
+
+@pytest.mark.skipif(shutil.which("node") is None or not PAGE_CHECK.is_file(), reason="needs node and the lab's page_check.sh")
+def test_every_page_module_evaluates_with_the_served_kit() -> None:
+    """The browser evaluates ui/*.js with NanoAgent's kit; `node --check` alone misses duplicate exports
+    and bad imports, so the lab's page check loads every module the way the page does."""
+    completed = subprocess.run(["bash", str(PAGE_CHECK), str(ROOT)], capture_output=True, text=True, timeout=120, check=False)
+    lines = completed.stdout.strip().splitlines()
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert lines and all(": OK" in line for line in lines), completed.stdout
+    assert any(line.startswith("app.js: OK") and "default is function" in line for line in lines)

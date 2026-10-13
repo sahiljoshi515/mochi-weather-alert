@@ -14,7 +14,7 @@ def verify_output(input_value, output_value, workspace):
     problem = names_problem(names, what="cities")
     if problem or not names:
         return result(False, problem or "no cities are listed")
-    if not all(23 <= row.hours <= 25 for row in output_value.cities):
+    if not all(23 <= row.hours_available <= 25 for row in output_value.cities):
         return result(False, "a local calendar day has 23, 24 or 25 hours")
     if not all(row.timezone.strip() and row.country.strip() for row in output_value.cities):
         return result(False, "every city has a country and a time zone")

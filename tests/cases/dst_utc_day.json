@@ -33,15 +33,7 @@
           "Denver",
           "Dubai",
           "Honolulu",
-          "Houston"
-        ],
-        "date": "2026-09-06"
-      }
-    },
-    {
-      "tool": "get_daily",
-      "arguments": {
-        "cities": [
+          "Houston",
           "Jakarta",
           "Lagos",
           "Lima",
@@ -51,15 +43,7 @@
           "Moscow",
           "Mumbai",
           "Nairobi",
-          "Oslo"
-        ],
-        "date": "2026-09-06"
-      }
-    },
-    {
-      "tool": "get_daily",
-      "arguments": {
-        "cities": [
+          "Oslo",
           "Perth",
           "Phoenix",
           "Reykjavik",

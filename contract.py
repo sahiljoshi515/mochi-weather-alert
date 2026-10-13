@@ -111,7 +111,7 @@ class CityDay(Output):
     city: str
     country: str
     timezone: Annotated[str, "The city's IANA time zone; its day is the calendar day there"]
-    hours: Annotated[int, HOURS]
+    hours_available: Annotated[int, HOURS]
 
 
 @dataclass
@@ -122,7 +122,7 @@ class CitiesOutput(Output):
 
 @dataclass
 class DailyInput(Output):
-    cities: Annotated[list[Annotated[str, CITY]], "1 to 10 distinct cities"]
+    cities: Annotated[list[Annotated[str, CITY]], "1 to 30 distinct cities: every city list_cities gives, in one call"]
     date: Annotated[str, DATE]
 
 
@@ -173,7 +173,7 @@ class HourlyOutput(Output):
 @dataclass
 class ReportInput(Output):
     date: Annotated[str, DATE]
-    alerts: Annotated[list[Alert], "Every city whose day satisfies the rules; [] for none"]
+    alerts: Annotated[list[Alert], "Every city whose day satisfies the rules, at most 30; [] for none"]
     unavailable: Annotated[list[Unavailable], "Every city with a missing hour for a variable the conditions use; [] for none"]
 
 

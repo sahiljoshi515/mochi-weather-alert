@@ -58,14 +58,20 @@ def value(text: str) -> Decimal | None:
 @lru_cache(maxsize=1)
 def snapshot() -> Snapshot:
     """The whole snapshot, parsed once."""
-    provenance = json.loads((DATA / "provenance.json").read_text(encoding="utf-8"))
+    try:
+        provenance = json.loads((DATA / "provenance.json").read_text(encoding="utf-8"))
+    except OSError as error:
+        raise RuntimeError("the snapshot's provenance.json is missing from the plugin's data folder") from error
     if (provenance["start"], provenance["end"]) != (SNAPSHOT_START, SNAPSHOT_END):
         raise RuntimeError("the snapshot's provenance disagrees with the rules' snapshot range")
     cities = tuple(City(**entry) for entry in json.loads((DATA / "cities.json").read_text(encoding="utf-8")))
     days: dict[tuple[str, str], list[Row]] = {}
-    with gzip.open(DATA / "hourly.csv.gz", "rb") as compressed:
-        reader = csv.DictReader(io.TextIOWrapper(compressed, encoding="utf-8", newline=""))
-        for row in reader:
-            values = {variable: value(row[variable]) for variable in SOURCE_VARIABLES}
-            days.setdefault((row["city"], row["time"][:10]), []).append((row["time"], values))
+    try:
+        with gzip.open(DATA / "hourly.csv.gz", "rb") as compressed:
+            reader = csv.DictReader(io.TextIOWrapper(compressed, encoding="utf-8", newline=""))
+            for row in reader:
+                values = {variable: value(row[variable]) for variable in SOURCE_VARIABLES}
+                days.setdefault((row["city"], row["time"][:10]), []).append((row["time"], values))
+    except OSError as error:
+        raise RuntimeError("the snapshot's hourly.csv.gz is missing from the plugin's data folder") from error
     return Snapshot(cities=cities, days=days, fetched_at=provenance["fetched_at"], start=SNAPSHOT_START, end=SNAPSHOT_END)

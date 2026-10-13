@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from .checks import date_check, result
-from .rules import VARIABLES, parse_condition
+from .rules import MAX_REPORT_ENTRIES, VARIABLES, parse_condition
 
 REPORT_DIR = "weather-alert"
 KINDS = ("alert", "unavailable")
@@ -78,6 +78,8 @@ def report_problem(report):
         cities.append(entry["city"])
     if len(set(cities)) != len(cities):
         return "a city may appear once, as an alert or as unavailable"
+    if len(cities) > MAX_REPORT_ENTRIES:
+        return f"a report names at most {MAX_REPORT_ENTRIES} cities"
     return None
 
 

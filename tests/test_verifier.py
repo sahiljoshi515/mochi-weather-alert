@@ -145,6 +145,7 @@ def test_refuses_every_wrong_report_and_scores_it(tmp_path: Path, name: str, rep
         ({"date": DATE, "alerts": [{"city": "Gale", "values": {}, "matched": []}, {"city": "Gale", "values": {}, "matched": []}], "unavailable": []}, "once"),
         ({"date": DATE, "alerts": [], "unavailable": [{"city": "Gap", "variables": []}]}, "variables must name"),
         ({"date": DATE, "alerts": [], "unavailable": [{"city": "Gap", "variables": ["max_temp", "max_temp"]}]}, "distinct"),
+        ({"date": DATE, "alerts": [{"city": f"City {n}", "values": {}, "matched": []} for n in range(31)], "unavailable": []}, "at most 30"),
     ],
 )
 def test_refuses_a_missing_or_malformed_report(tmp_path: Path, report, message: str) -> None:
@@ -189,13 +190,13 @@ def test_refuses_bad_task_input(change: dict, message: str) -> None:
 
 
 def test_checks_the_other_tool_inputs() -> None:
-    names = [f"City {n}" for n in range(11)]
+    names = [f"City {n}" for n in range(31)]
     assert verify_input("get_daily", {"cities": names, "date": DATE})["valid"] is False
     assert verify_input("get_daily", {"cities": [], "date": DATE})["valid"] is False
     assert verify_input("get_daily", {"cities": ["Athens", "Athens"], "date": DATE})["valid"] is False
     assert verify_input("get_daily", {"cities": [" "], "date": DATE})["valid"] is False
-    assert verify_input("get_daily", {"cities": names[:10], "date": "2026-10-02"})["valid"] is False
-    assert verify_input("get_daily", {"cities": names[:10], "date": DATE})["valid"] is True
+    assert verify_input("get_daily", {"cities": names[:30], "date": "2026-10-02"})["valid"] is False
+    assert verify_input("get_daily", {"cities": names[:30], "date": DATE})["valid"] is True
     assert verify_input("list_cities", {"date": "2026-06-30"})["valid"] is False
     assert verify_input("list_cities", {"date": DATE})["valid"] is True
     assert verify_input("get_hourly", {"city": "", "date": DATE})["valid"] is False
@@ -207,6 +208,10 @@ def test_checks_the_other_tool_inputs() -> None:
     assert verify_input("report_alerts", {**GOLD, "alerts": bad_matched})["valid"] is False
     bad_values = [{**GOLD["alerts"][0], "values": {"gust": 1.0}}]
     assert verify_input("report_alerts", {**GOLD, "alerts": bad_values})["valid"] is False
+    crowd = [{"city": f"City {n}", "values": {}, "matched": []} for n in range(31)]
+    found = verify_input("report_alerts", {**GOLD, "alerts": crowd, "unavailable": []})
+    assert found["valid"] is False and "at most 30" in found["message"]
+    assert verify_input("report_alerts", {**GOLD, "alerts": crowd[:30], "unavailable": []})["valid"] is True
 
 
 def test_checks_the_pin_against_its_own_aggregates(tmp_path: Path) -> None:
@@ -222,10 +227,10 @@ def test_checks_the_pin_against_its_own_aggregates(tmp_path: Path) -> None:
 
 
 def test_checks_list_cities_and_get_daily_outputs(tmp_path: Path) -> None:
-    listed = {"date": DATE, "cities": [{"city": "Athens", "country": "Greece", "timezone": "Europe/Athens", "hours": 24}, {"city": "Santiago", "country": "Chile", "timezone": "America/Santiago", "hours": 23}]}
+    listed = {"date": DATE, "cities": [{"city": "Athens", "country": "Greece", "timezone": "Europe/Athens", "hours_available": 24}, {"city": "Santiago", "country": "Chile", "timezone": "America/Santiago", "hours_available": 23}]}
     assert verify_output("list_cities", {"date": DATE}, listed, tmp_path)["valid"] is True
     assert verify_output("list_cities", {"date": "2026-09-05"}, listed, tmp_path)["valid"] is False
-    short = {**listed, "cities": [{**listed["cities"][1], "hours": 22}]}
+    short = {**listed, "cities": [{**listed["cities"][1], "hours_available": 22}]}
     assert verify_output("list_cities", {"date": DATE}, short, tmp_path)["valid"] is False
     daily = {"date": DATE, "cities": [{"city": "Athens", "country": "Greece", "hours": 24, "max_temp_c": 35.7, "min_temp_c": 23.1, "rain_mm": 0.0, "max_wind_kmh": 9.2, "mean_humidity_pct": 31.4583, "missing": []}]}
     assert verify_output("get_daily", {"cities": ["Athens"], "date": DATE}, daily, tmp_path)["valid"] is True

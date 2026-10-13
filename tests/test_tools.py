@@ -57,10 +57,10 @@ def test_pin_alerts_refuses_bad_input(tmp_path: Path, change: dict, error: str) 
 def test_list_cities_gives_every_city_with_its_day_length(tmp_path: Path) -> None:
     listed = list_cities(build_output({"date": DATE}, CitiesInput), tmp_path)
     assert [row.city for row in listed.cities] == NAMES
-    assert {row.city: row.hours for row in listed.cities if row.hours != 24} == {"Santiago": 23}
+    assert {row.city: row.hours_available for row in listed.cities if row.hours_available != 24} == {"Santiago": 23}
     assert next(row for row in listed.cities if row.city == "Auckland").timezone == "Pacific/Auckland"
     later = list_cities(build_output({"date": "2026-09-27"}, CitiesInput), tmp_path)
-    assert {row.city: row.hours for row in later.cities if row.hours != 24} == {"Auckland": 23}
+    assert {row.city: row.hours_available for row in later.cities if row.hours_available != 24} == {"Auckland": 23}
     assert len(json.dumps(plain_output(listed))) < 3500
     with pytest.raises(ValueError, match="outside the snapshot"):
         list_cities(build_output({"date": "2026-06-30"}, CitiesInput), tmp_path)
@@ -79,13 +79,16 @@ def test_get_daily_gives_metric_aggregates_for_the_requested_cities(tmp_path: Pa
         assert abs(Fraction(str(row.mean_humidity_pct)) - mean) <= Fraction(1, 20000)
     assert len(json.dumps(plain_output(found))) < 2500
     assert next(row for row in found.cities if row.city == "Athens").mean_humidity_pct == 31.4583  # 755/24
+    everything = get_daily(build_output({"cities": NAMES, "date": DATE}, DailyInput), tmp_path)
+    assert [row.city for row in everything.cities] == NAMES
+    assert len(json.dumps(plain_output(everything))) < 7000  # about 1,600 tokens for the whole day
 
 
 @pytest.mark.parametrize(
     ("cities", "error"),
     [
-        (NAMES[:11], "1 to 10"),
-        ([], "1 to 10"),
+        (NAMES + ["Atlantis"], "1 to 30"),
+        ([], "1 to 30"),
         (["Athens", "Athens"], "distinct"),
         (["Athens", "Atlantis"], "unknown city Atlantis"),
         (["athens"], "unknown city athens"),
@@ -136,3 +139,6 @@ def test_report_alerts_writes_and_replaces_the_report(tmp_path: Path) -> None:
         report_alerts(doubled, tmp_path)
     with pytest.raises(ValueError, match="outside the snapshot"):
         report_alerts(build_output({"date": "2027-01-01", "alerts": [], "unavailable": []}, ReportInput), tmp_path)
+    crowd = [{"city": f"City {n}", "values": {}, "matched": []} for n in range(31)]
+    with pytest.raises(ValueError, match="at most 30"):
+        report_alerts(build_output({"date": DATE, "alerts": crowd, "unavailable": []}, ReportInput), tmp_path)

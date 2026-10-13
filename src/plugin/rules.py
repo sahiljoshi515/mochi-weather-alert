@@ -32,7 +32,8 @@ WIND_UNITS = ("kmh", "mph", "ms")
 RAIN_UNITS = ("mm", "in")
 MIN_CONDITIONS = 1
 MAX_CONDITIONS = 6
-MAX_CITIES_PER_CALL = 10
+MAX_CITIES_PER_CALL = 30
+MAX_REPORT_ENTRIES = 30  # the snapshot's cities: a report names each at most once
 PLACES = 1  # reported values carry one decimal
 DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 CONDITION = re.compile(r"^\s*(max_temp|min_temp|rain|wind|humidity)\s*(>=|<=|>|<)\s*([+-]?(?:\d+(?:\.\d{1,2})?|\.\d{1,2}))\s*$")
