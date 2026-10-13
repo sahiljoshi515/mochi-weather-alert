@@ -1,0 +1,86 @@
+{
+  "note": "The agent reads the data but never calls report_alerts.",
+  "task": "daily-alert",
+  "arguments": {
+    "date": "2026-07-07",
+    "match": "any",
+    "temperature_unit": "F",
+    "wind_unit": "mph",
+    "rain_unit": "in",
+    "conditions": [
+      "max_temp >= 101.3",
+      "humidity >= 80",
+      "rain > 0.5",
+      "wind >= 20"
+    ]
+  },
+  "steps": [
+    {
+      "tool": "list_cities",
+      "arguments": {
+        "date": "2026-07-07"
+      },
+      "save_as": "cities"
+    },
+    {
+      "tool": "get_daily",
+      "arguments": {
+        "cities": [
+          "Athens",
+          "Auckland",
+          "Bangkok",
+          "Buenos Aires",
+          "Cairo",
+          "Cape Town",
+          "Denver",
+          "Dubai",
+          "Honolulu",
+          "Houston"
+        ],
+        "date": "2026-07-07"
+      }
+    },
+    {
+      "tool": "get_daily",
+      "arguments": {
+        "cities": [
+          "Jakarta",
+          "Lagos",
+          "Lima",
+          "London",
+          "Madrid",
+          "Mexico City",
+          "Moscow",
+          "Mumbai",
+          "Nairobi",
+          "Oslo"
+        ],
+        "date": "2026-07-07"
+      }
+    },
+    {
+      "tool": "get_daily",
+      "arguments": {
+        "cities": [
+          "Perth",
+          "Phoenix",
+          "Reykjavik",
+          "Santiago",
+          "Seoul",
+          "Singapore",
+          "Sydney",
+          "Tokyo",
+          "Toronto",
+          "Vancouver"
+        ],
+        "date": "2026-07-07"
+      }
+    }
+  ],
+  "answer": "I could not decide.",
+  "expect": {
+    "valid": false,
+    "message_contains": "no report",
+    "score_max": 0.0
+  }
+}

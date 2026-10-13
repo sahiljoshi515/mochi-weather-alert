@@ -1,0 +1,42 @@
+_ > nanoagent.plugin.manifest.ManifestConfig:
+id: weather-alert
+name: Weather Alert
+version: 0.1.0
+status: ready
+
+runtime > nanoagent.plugin.manifest.RuntimeConfig:
+  type: mcp_stdio
+  command: [uv, run, --frozen, python, -m, plugin]
+
+permissions > nanoagent.plugin.manifest.PermissionsConfig:
+  network > nanoagent.plugin.manifest.NetworkConfig:
+    hosts: []
+  filesystem > nanoagent.plugin.manifest.FilesystemConfig:
+    write: [workspace]
+
+# One entry per contract.Tool; its input and output classes are contract.TOOLS's.
+tools > dict[contract.Tool, nanoagent.plugin.manifest.ToolConfig]:
+  pin_alerts:
+    description: Pin every city's local day in metric units and the alerts the rules give it; the task's answer key
+  list_cities:
+    description: List the snapshot's 30 cities with how many hours each one's local calendar day has on a date
+  get_daily:
+    description: Get up to 10 cities' local-day aggregates on a date, in metric units (°C, mm, km/h, %), with any missing variables
+  get_hourly:
+    description: Get one city's hourly rows over its local calendar day, in metric units
+  report_alerts:
+    description: Report the alert cities with their values and matched conditions, and the unavailable cities, to weather-alert/<date>.json
+
+# One entry per contract.Task; its input class is contract.TASKS's.
+tasks > dict[contract.Task, nanoagent.plugin.manifest.TaskConfig]:
+  daily-alert:
+    description: Find every city whose local day on a date satisfies the threshold conditions, and report each one's values in the requested units
+    runner: agent
+    tools: [list_cities, get_daily, get_hourly, report_alerts]
+    reference: pin_alerts
+    instructions: |-
+      Rules. A condition is "<variable> <op> <number>". max_temp and min_temp are the day's highest and lowest hourly temperature, rain is the day's precipitation total, wind is the day's highest hourly wind speed, and humidity is the day's mean relative humidity in % (the arithmetic mean over the hours present). op is >=, >, <= or <, and the number is in the requested units. With match "all" a city is an alert when every condition holds for it; with "any" when at least one does. The day is each city's local calendar day: it has 23 hours when clocks go forward, 25 when they go back, else 24.
+      Data. Call list_cities once with the date, then get_daily for every city, at most 10 cities per call: it gives the day's aggregates in metric units (°C, mm, km/h, %) and the source variables with a missing hour. get_hourly gives one city's hours if you need them. Every city must be examined.
+      Arithmetic, done exactly with Decimal or Fraction, never with binary floats. °F = °C × 9/5 + 32; mph = km/h ÷ 1.609344; m/s = km/h ÷ 3.6; in = mm ÷ 25.4; humidity stays in %. Test each condition against the exact, unrounded converted value. Report each value rounded to 1 decimal, half up (Decimal's ROUND_HALF_UP), in the requested units: 24.95 becomes 25.0 and 71.25 becomes 71.3, while 24.979 mph is not >= 25 even though it is reported as 25.0.
+      Missing data. A city whose get_daily "missing" names the source of a variable a condition uses (max_temp and min_temp come from temperature_2m, rain from precipitation, wind from wind_speed_10m, humidity from relative_humidity_2m) goes under unavailable with those variables, and is never an alert, whatever its values.
+      Report. Call report_alerts once with the date; every alert city with values (one entry per variable the conditions use, in the requested units, rounded as above) and matched (the conditions that hold for it, as given); and every unavailable city with its variables. Use [] where there are none. Then answer with a short summary naming each alert city and its values.

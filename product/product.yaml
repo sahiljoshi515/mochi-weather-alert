@@ -1,0 +1,13 @@
+_ > nanoagent.plugin.manifest.ProductConfig:
+tagline: "Find the cities whose day crossed your weather thresholds, checked against the data"
+summary: "Pick a day and a few threshold rules, such as a high above 95 °F or more than half an inch of rain, in the units you prefer. The agent reads a pinned archive of hourly weather for 30 world cities, converts and rounds every value exactly, applies the rules to each city's local day, and reports the cities that qualify. Every value in the list is recomputed from the same data and must match to the decimal."
+highlights:
+  - "30 cities across every climate, from Reykjavik to Singapore, for July to September 2026"
+  - "Your units: °C or °F, km/h, mph or m/s, mm or inches, with exact conversion and half-up rounding"
+  - "Each city's real local day, 23 hours when clocks spring forward"
+  - "The list is checked city by city, value by value, against the pinned data"
+steps:
+  - "Pick a day in the snapshot and your units"
+  - "Add one to six rules like max_temp >= 95 or rain > 0.5"
+  - "The agent reads every city's day and applies the rules"
+  - "Get the cities that qualify, with their exact values, checked"

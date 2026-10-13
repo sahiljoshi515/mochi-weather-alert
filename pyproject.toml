@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanoagent-weather-alert"
+version = "0.1.0"
+description = "Weather Alert: a NanoAgent plugin"
+requires-python = ">=3.12"
+dependencies = ["mcp>=1.27,<2", "slimconfig"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# The pinned snapshot ships inside the package, whichever way it is installed.
+plugin = ["data/*.json", "data/*.gz"]
+
+[tool.uv.sources]
+slimconfig = { git = "https://github.com/zeyuyang8/slimconfig", branch = "master" }
+
+[tool.ruff]
+line-length = 120
+
+[tool.pytest.ini_options]
+# contract.py and verifier/ live at the plugin root.
+pythonpath = ["."]
+markers = ["network: needs the network (set NANOAGENT_NETWORK=1 to run)"]
