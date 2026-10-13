@@ -5,42 +5,11 @@
 import { banner, dataTable, disclosure, h, icon } from "./kit/components.js";
 
 export { GRAMMAR, MAX_CONDITIONS, OPS, VARIABLES, canonicalNumber, conditionProblem, parseCondition } from "./grammar.js";
-import { VARIABLES, parseCondition } from "./grammar.js";
+import { GRAMMAR, MAX_CONDITIONS, VARIABLES, parseCondition } from "./grammar.js";
 
 const VARIABLE_WORDS = { max_temp: "High", min_temp: "Low", rain: "Rain", wind: "Wind", humidity: "Humidity" };
 const UNIT_WORDS = { C: "°C", F: "°F", kmh: "km/h", mph: "mph", ms: "m/s", mm: "mm", in: "in" };
 const METRIC_UNITS = { temperature: "C", wind: "kmh", rain: "mm" };
-
-/** A threshold as its shortest plain text, as Python's Decimal.normalize() writes it: 95.00 → 95, .5 → 0.5, -0 → 0. */
-export function canonicalNumber(text) {
-  let rest = text.trim();
-  const negative = rest.startsWith("-");
-  rest = rest.replace(/^[+-]/, "");
-  let [whole, fraction = ""] = rest.split(".");
-  whole = whole.replace(/^0+/, "") || "0";
-  fraction = fraction.replace(/0+$/, "");
-  if (whole === "0" && fraction === "") return "0";
-  return `${negative ? "-" : ""}${whole}${fraction ? `.${fraction}` : ""}`;
-}
-
-/** The condition `text` means, `{variable, op, number, text}` with `text` canonical, or null. */
-export function parseCondition(text) {
-  const found = typeof text === "string" ? text.match(CONDITION) : null;
-  if (!found) return null;
-  const [, variable, op, number] = found;
-  const canonical = canonicalNumber(number);
-  return { variable, op, number: canonical, text: `${variable} ${op} ${canonical}` };
-}
-
-/** A plain-words reason `text` cannot join the rules `existing`, or null. */
-export function conditionProblem(text, existing = []) {
-  const parsed = parseCondition(text);
-  if (!parsed) return GRAMMAR;
-  const twin = existing.find((other) => parseCondition(other)?.text === parsed.text);
-  if (twin) return twin === text ? "That rule is already in the list." : `That rule means the same as ${twin}.`;
-  if (existing.length >= MAX_CONDITIONS) return `Up to ${MAX_CONDITIONS} rules.`;
-  return null;
-}
 
 // ----- Words -----
 
@@ -214,7 +183,7 @@ function unavailableList(result) {
 
 function allCitiesTable(result) {
   const alerted = new Set(result.expected.alerts.map((alert) => alert.city));
-  const rows = result.cities.map((row) => ({ ...row, ...(row.metric ?? {}) }));
+  const rows = result.cities.map((row) => ({ ...row, ...(row.metric ?? {}), hours: row.metric?.hours ?? row.hours_available ?? null }));
   const number = (key, digits = 1) => (row) => (row[key] === null || row[key] === undefined ? null : h("span", { class: "numeric", text: row[key].toFixed(digits) }));
   return dataTable({
     columns: [
