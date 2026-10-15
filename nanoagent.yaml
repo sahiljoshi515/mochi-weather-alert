@@ -1,7 +1,7 @@
 _ > nanoagent.plugin.manifest.ManifestConfig:
 id: weather-alert
 name: Weather Alert
-version: 0.2.1
+version: 0.2.2
 status: ready
 nanoagent: ~=0.5.0
 

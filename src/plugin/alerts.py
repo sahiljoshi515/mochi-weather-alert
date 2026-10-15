@@ -52,6 +52,9 @@ from plugin.rules import (
 # The report lives in the run's folder, which is the member's own folder for this plugin.
 REPORT_DIR = "reports"
 RUN_MARKER = "run.json"
+# Every tool call of every run, one JSON line each, kept short: what a run did when its agent went wrong.
+CALL_LOG = "calls.log"
+CALL_LOG_LINES = 300
 # This plugin process's run: the server records it in the workspace at its start, every report carries
 # it, and a report left by an earlier run (another token, or an older shape) is replaced, never merged.
 RUN = secrets.token_hex(8)
@@ -196,6 +199,45 @@ def write_run_marker(workspace: Path) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_atomic(path, json.dumps({"run": RUN, "started": datetime.now(UTC).isoformat(timespec="seconds")}, indent=2) + "\n")
     return RUN
+
+
+def call_summary(name: str, arguments: dict) -> dict:
+    """What a call asked for, in a few numbers: never its whole arguments."""
+    if name == "get_daily":
+        return {"date": arguments.get("date"), "cities": len(arguments.get("cities") or [])}
+    if name == "report_alerts":
+        task = arguments.get("task") or {}
+        return {
+            "date": task.get("date"),
+            "examined": len(arguments.get("examined") or []),
+            "alerts": len(arguments.get("alerts") or []),
+            "unavailable": len(arguments.get("unavailable") or []),
+        }
+    return {"date": arguments.get("date"), "city": arguments.get("city")}
+
+
+def log_call(workspace: Path, name: str, arguments: dict, result: str, seconds: float) -> None:
+    """Append one line for a tool call to reports/calls.log in the workspace (the member's folder for
+    this plugin), keeping the last CALL_LOG_LINES lines; a log that cannot be written never fails a call."""
+    line = json.dumps(
+        {
+            "at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "run": RUN,
+            "tool": name,
+            **call_summary(name, arguments),
+            "seconds": round(seconds, 2),
+            "result": result[:200],
+        }
+    )
+    try:
+        path = workspace.resolve() / REPORT_DIR / CALL_LOG
+        with LOCK:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+            lines.append(line)
+            write_atomic(path, "\n".join(lines[-CALL_LOG_LINES:]) + "\n")
+    except OSError:
+        pass
 
 
 def marker_is_current(workspace: Path) -> bool:

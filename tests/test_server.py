@@ -73,6 +73,14 @@ def test_runs_a_gold_path_over_stdio(tmp_path: Path) -> None:
     marker = json.loads((tmp_path / "reports" / "run.json").read_text())
     assert saved == {"date": DATE, "run": marker["run"], "task": TASK, "examined": ["Cairo"], "alerts": call["alerts"], "unavailable": []}
     assert isinstance(marker["run"], str) and len(marker["run"]) == 16
+    # every call, ok or not, is one short line of reports/calls.log, for the run that made it
+    logged = [json.loads(line) for line in (tmp_path / "reports" / "calls.log").read_text().splitlines()]
+    assert [entry["tool"] for entry in logged] == ["list_cities", "get_daily", "get_hourly", "report_alerts", "get_daily", "list_cities", "report_alerts"]
+    assert all(entry["run"] == marker["run"] and entry["seconds"] >= 0 for entry in logged)
+    assert logged[1] == {**logged[1], "date": DATE, "cities": 10, "result": "ok"}
+    assert logged[3] == {**logged[3], "date": DATE, "examined": 1, "alerts": 1, "unavailable": 0, "result": "ok"}
+    assert logged[4]["result"].startswith("error: unknown city Atlantis") and logged[6]["result"].startswith("error:")
+    assert all(len(line) < 400 for line in (tmp_path / "reports" / "calls.log").read_text().splitlines())
 
 
 def test_the_server_writes_the_run_marker_when_it_starts(tmp_path: Path) -> None:

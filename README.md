@@ -128,6 +128,9 @@ uv run ruff check .
 ```
 
 NanoAgent passes the folder the plugin may write to as `NANOAGENT_WORKSPACE`;
-the report goes to `reports/<date>.json` in it. Publishing checks every plugin
+the report goes to `reports/<date>.json` in it, and every tool call of every
+run leaves one short line in `reports/calls.log` (the run's marker, the tool,
+a few counts, the seconds it took, ok or the error), so a run whose agent went
+wrong can be read back from the member's folder. Publishing checks every plugin
 rule: push the plugin to a public GitHub repository and run
 `rush publish <server> <github-url>`, or submit the URL on the marketplace.

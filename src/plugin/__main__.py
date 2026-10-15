@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from mcp.server.stdio import stdio_server
 from slimconfig import build_output, output_schema, plain_output
 
 from contract import TOOLS, Tool
-from plugin import get_daily, get_hourly, list_cities, pin_alerts, report_alerts, write_run_marker
+from plugin import get_daily, get_hourly, list_cities, log_call, pin_alerts, report_alerts, write_run_marker
 
 server = Server("weather-alert")
 # NanoAgent names the one folder this plugin may write to.
@@ -38,12 +39,19 @@ async def list_tools() -> list[types.Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    # A failure raises; the MCP server returns it as an error result.
+    # A failure raises; the MCP server returns it as an error result. Either way the call is logged.
     tool = Tool(name)
     given, made = TOOLS[tool]
-    output = IMPLEMENTATIONS[tool](build_output(arguments, given), Path(os.environ[WORKSPACE_ENV]))
-    if not isinstance(output, made):
-        raise TypeError(f"{name} returned {type(output).__name__}, not {made.__name__}")
+    workspace = Path(os.environ[WORKSPACE_ENV])
+    started = time.perf_counter()
+    try:
+        output = IMPLEMENTATIONS[tool](build_output(arguments, given), workspace)
+        if not isinstance(output, made):
+            raise TypeError(f"{name} returned {type(output).__name__}, not {made.__name__}")
+    except Exception as error:
+        log_call(workspace, name, arguments, f"error: {error}", time.perf_counter() - started)
+        raise
+    log_call(workspace, name, arguments, "ok", time.perf_counter() - started)
     return plain_output(output)
 
 
