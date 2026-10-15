@@ -39,19 +39,22 @@ in metric units and the alerts the shared rules give. The agent then has
 `get_daily`, `report_alerts` and `submit`, and six steps:
 
 1. `get_daily` once with all 30 cities (about 1,600 tokens of aggregates).
-2. to 4. `report_alerts` three times, ten cities each, in the order the
-   instructions list them. Each call repeats the task input, names the cities
-   it `examined`, and gives every alert city its `values` (one per variable
-   the conditions use, in the requested units, rounded half up to one
-   decimal) and `matched` conditions, and every `unavailable` city the
-   variables it has a missing hour for. The call merges that judgement into
-   `reports/<date>.json` and answers with the merged report so far, how many
-   cities are examined and whether that is every city.
-5. `submit` with the report the last call returned, as it is.
-6. The final answer.
+2. `report_alerts` over the cities in the order the instructions list them,
+   a fixed number per call: ten per call (three calls) when the conditions
+   use four or five variables, fifteen (two calls) when they use fewer. Each
+   call repeats the task input, names the cities it `examined`, and gives
+   every alert city its `values` (one per variable the conditions use, in
+   the requested units, rounded half up to one decimal) and `matched`
+   conditions, and every `unavailable` city the variables it has a missing
+   hour for. The call merges that judgement into `reports/<date>.json` and
+   answers with the merged report so far, how many cities are examined and
+   whether that is every city.
+3. `submit` with the report the last call returned, as it is.
+4. The final answer.
 
-Ten cities per step keeps each reply, reasoning included, inside the hosted
-model's output cap; the five tool calls fit the hosted agent's six steps.
+The chunk size keeps each reply, reasoning included, inside the hosted
+model's 2,048-token output cap, and the four or five tool calls fit the
+hosted agent's six steps, which the site's 180-second run limit also bounds.
 
 ### The verdict
 

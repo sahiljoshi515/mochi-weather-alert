@@ -1,5 +1,5 @@
 {
-  "note": "The prescribed path: get_daily with all 30 cities, three report_alerts calls of 10 examined cities each, then submit with the report the last call returned.",
+  "note": "The prescribed path for four needed variables: get_daily with all 30 cities, three report_alerts calls of 10 examined cities each, then submit with the report the last call returned.",
   "task": "daily-alert",
   "arguments": {
     "date": "2026-07-07",

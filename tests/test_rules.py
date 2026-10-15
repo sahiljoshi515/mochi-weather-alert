@@ -12,6 +12,7 @@ from plugin.rules import (
     Units,
     aggregate,
     canonical_task,
+    chunk_size,
     convert,
     date_problem,
     evaluate,
@@ -300,6 +301,13 @@ def test_checks_a_task(task, problem) -> None:
     assert (found is None) == (problem is None), found
     if problem:
         assert problem in found
+
+
+def test_the_prescribed_chunk_size_follows_the_needed_variables() -> None:
+    assert chunk_size(parse_conditions(["max_temp >= 95"])) == 15
+    assert chunk_size(parse_conditions(["max_temp >= 95", "min_temp < 50", "humidity >= 85"])) == 15
+    assert chunk_size(parse_conditions(["max_temp >= 95", "min_temp < 50", "humidity >= 85", "rain > 0.5"])) == 10
+    assert chunk_size(parse_conditions(["max_temp >= 95", "max_temp >= 100", "humidity >= 85", "rain > 0.5"])) == 15  # three variables
 
 
 def test_canonical_tasks_compare_equal_when_they_mean_the_same() -> None:

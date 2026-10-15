@@ -4,9 +4,10 @@
 
 Each case is what ~/mochi-dev/harness/scripted_task.py runs: the task's arguments, the scripted
 agent's steps and the expected verdict. The prescribed path is get_daily once with all 30 cities,
-then report_alerts three times with 10 examined cities each (so a hosted model converts 10 cities
-per step, inside its 2,048-token reply cap), then submit with the report the last call returned:
-five tool calls of the hosted agent's six steps, the sixth being its final answer.
+then report_alerts over the cities in order, 10 per call when the conditions use 4 or 5 variables
+and 15 when they use fewer (so a hosted model's reply, reasoning included, stays inside its
+2,048-token cap), then submit with the report the last call returned: four or five tool calls of the
+hosted agent's six steps, the last step being its final answer.
 gold does it in one report_alerts call, gold_chunked in three, batched_daily reads the cities in
 two get_daily calls, corrected fixes an earlier chunk's mistakes in a later call, unexamined stops
 after two chunks, overlapping_calls restates five cities in two chunks, stale_old_version and
@@ -38,10 +39,10 @@ from contract import AlertInput, AlertReportOutput, HourlyInput, PinOutput, Repo
 from plugin.alerts import get_hourly, pin_alerts, report_alerts, write_run_marker
 from plugin.data import snapshot
 from plugin.rules import (
-    CHUNK,
     MAX_CITIES_PER_CALL,
     Units,
     aggregate,
+    chunk_size,
     convert,
     evaluate,
     exact_metric,
@@ -82,6 +83,15 @@ def report_steps(task: dict, judgement: dict, chunks: int = 1, examined: list[st
     call, or ``chunks`` calls; the last one's output is saved as `last` for the submit step."""
     examined = names() if examined is None else examined
     size = -(-len(examined) // chunks)
+    return chunked_steps(task, judgement, examined, size)
+
+
+def prescribed_steps(task: dict, judgement: dict) -> list[dict]:
+    """The report_alerts calls of the prescribed path: chunk_size cities each, in order."""
+    return chunked_steps(task, judgement, names(), chunk_size(parse_conditions(task["conditions"])))
+
+
+def chunked_steps(task: dict, judgement: dict, examined: list[str], size: int) -> list[dict]:
     steps = [{"tool": "report_alerts", "arguments": chunk_call(task, judgement, examined[start : start + size])} for start in range(0, len(examined), size)]
     steps[-1]["save_as"] = "last"
     return steps
@@ -237,12 +247,14 @@ def main() -> int:
     valid = {"valid": True, "score_min": 1.0}
     write_case("gold", f"The exact report for {date} in one report_alerts call, then submit: {tie_city}'s humidity is a rounding tie (half up), {boundary_city}'s high sits exactly on its threshold.",
                arguments, pinned, read + report_steps(task, judgement) + [SUBMIT_LAST], expect=valid, answer=summary(gold))
-    write_case("gold_chunked", "The prescribed path: get_daily with all 30 cities, three report_alerts calls of 10 examined cities each, then submit with the report the last call returned.",
-               arguments, pinned, read + report_steps(task, judgement, len(names()) // CHUNK) + [SUBMIT_LAST], expect=valid, answer=summary(gold))
+    write_case("gold_chunked", "The prescribed path for four needed variables: get_daily with all 30 cities, three report_alerts calls of 10 examined cities each, then submit with the report the last call returned.",
+               arguments, pinned, read + prescribed_steps(task, judgement) + [SUBMIT_LAST], expect=valid, answer=summary(gold))
     write_case("batched_daily", "The exact report after two get_daily calls of 15 instead of one.",
                arguments, pinned, read_steps(date, batch=15) + report_steps(task, judgement) + [SUBMIT_LAST], expect=valid, answer=summary(gold))
 
-    chunks = report_steps(task, judgement, 3)
+    chunks = prescribed_steps(task, judgement)
+    if len(chunks) != 3:
+        raise RuntimeError("the gold day's four needed variables prescribe three chunks")
     two = json.loads(json.dumps(chunks[:2]))
     two[-1]["save_as"] = "last"
     write_case("unexamined", "Only two of the three report_alerts calls, then submit: ten cities are never examined.",
@@ -384,8 +396,8 @@ def main() -> int:
     if santiago.hours != 23 or "Santiago" not in {a["city"] for a in dst_gold["alerts"]}:
         raise RuntimeError("Santiago is not a 23-hour alert on the DST day")
     dst_read = read_steps(DST_DATE)
-    write_case("gold_dst", "The exact report for Santiago's 23-hour day (clocks went forward at midnight), in three report_alerts calls, then submit.",
-               dst_arguments, dst_pin, dst_read + report_steps(dst_task, judgement_of(dst_gold), 3) + [SUBMIT_LAST], expect=valid, answer=summary(dst_gold))
+    write_case("gold_dst", "The exact report for Santiago's 23-hour day (clocks went forward at midnight) on the prescribed path for two needed variables: two report_alerts calls of 15 cities, then submit.",
+               dst_arguments, dst_pin, dst_read + prescribed_steps(dst_task, judgement_of(dst_gold)) + [SUBMIT_LAST], expect=valid, answer=summary(dst_gold))
 
     # Santiago aggregated over the 24 UTC hours of the date instead of its local day
     utc = utc_day_metrics("Santiago", DST_DATE)
@@ -397,7 +409,7 @@ def main() -> int:
     if entry["values"] == alert(dst_gold, "Santiago")["values"]:
         raise RuntimeError("the UTC day gives Santiago the same values as its local day")
     write_case("dst_utc_day", "Santiago's values taken over the 24 UTC hours of the date instead of its 23-hour local day.",
-               dst_arguments, dst_pin, dst_read + report_steps(dst_task, wrong, 3) + [SUBMIT_LAST], expect={"valid": False, "message_contains": "with a wrong value"}, answer=summary(wrong))
+               dst_arguments, dst_pin, dst_read + prescribed_steps(dst_task, wrong) + [SUBMIT_LAST], expect={"valid": False, "message_contains": "with a wrong value"}, answer=summary(wrong))
 
     # sanity: the hourly rows of the DST day really skip the missing hour
     hours = get_hourly(build_output({"city": "Santiago", "date": DST_DATE}, HourlyInput), Path(tempfile.mkdtemp()))

@@ -75,7 +75,12 @@
           "Denver",
           "Dubai",
           "Honolulu",
-          "Houston"
+          "Houston",
+          "Jakarta",
+          "Lagos",
+          "Lima",
+          "London",
+          "Madrid"
         ],
         "alerts": [
           {
@@ -117,16 +122,21 @@
           ]
         },
         "examined": [
-          "Jakarta",
-          "Lagos",
-          "Lima",
-          "London",
-          "Madrid",
           "Mexico City",
           "Moscow",
           "Mumbai",
           "Nairobi",
-          "Oslo"
+          "Oslo",
+          "Perth",
+          "Phoenix",
+          "Reykjavik",
+          "Santiago",
+          "Seoul",
+          "Singapore",
+          "Sydney",
+          "Tokyo",
+          "Toronto",
+          "Vancouver"
         ],
         "alerts": [
           {
@@ -148,38 +158,7 @@
             "matched": [
               "min_temp < 50"
             ]
-          }
-        ],
-        "unavailable": []
-      }
-    },
-    {
-      "tool": "report_alerts",
-      "arguments": {
-        "task": {
-          "date": "2026-09-06",
-          "match": "any",
-          "temperature_unit": "F",
-          "wind_unit": "ms",
-          "rain_unit": "mm",
-          "conditions": [
-            "min_temp < 50",
-            "humidity >= 85"
-          ]
-        },
-        "examined": [
-          "Perth",
-          "Phoenix",
-          "Reykjavik",
-          "Santiago",
-          "Seoul",
-          "Singapore",
-          "Sydney",
-          "Tokyo",
-          "Toronto",
-          "Vancouver"
-        ],
-        "alerts": [
+          },
           {
             "city": "Reykjavik",
             "values": {

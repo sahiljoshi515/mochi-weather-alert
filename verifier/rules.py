@@ -36,7 +36,10 @@ MAX_CONDITIONS = 6
 CITY_COUNT = 30  # the snapshot's cities
 MAX_CITIES_PER_CALL = CITY_COUNT
 MAX_REPORT_ENTRIES = CITY_COUNT  # a report names each city at most once
-CHUNK = 10  # cities per report_alerts call on the prescribed path
+# Cities per report_alerts call on the prescribed path: a hosted model's reply (its reasoning included)
+# must stay under 2,048 tokens, so the more variables the conditions use, the fewer cities per step.
+CHUNK_FEW = 15  # with 1 to 3 needed variables: two calls
+CHUNK_MANY = 10  # with 4 or 5: three calls
 PLACES = 1  # reported values carry one decimal
 DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 CONDITION = re.compile(r"^\s*(max_temp|min_temp|rain|wind|humidity)\s*(>=|<=|>|<)\s*([+-]?(?:\d+(?:\.\d{1,2})?|\.\d{1,2}))\s*$")
@@ -150,6 +153,11 @@ def needed_variables(conditions: list[Condition]) -> tuple[str, ...]:
     """The variables the conditions use, in the canonical order."""
     used = {condition.variable for condition in conditions}
     return tuple(variable for variable in VARIABLES if variable in used)
+
+
+def chunk_size(conditions: list[Condition]) -> int:
+    """How many cities one report_alerts call judges on the prescribed path."""
+    return CHUNK_MANY if len(needed_variables(conditions)) >= 4 else CHUNK_FEW
 
 
 # ----- Arithmetic -----
