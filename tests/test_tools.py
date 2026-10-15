@@ -127,54 +127,78 @@ def test_the_local_day_is_not_the_utc_day(tmp_path: Path) -> None:
     assert round(float(utc_mean), 1) != local.mean_humidity_pct
 
 
-def report(date, examined, alerts=(), unavailable=()):
-    return build_output({"date": date, "examined": list(examined), "alerts": list(alerts), "unavailable": list(unavailable)}, ReportInput)
+TASK = {"date": DATE, "match": "any", "temperature_unit": "F", "wind_unit": "mph", "rain_unit": "in", "conditions": ["max_temp >= 95", "rain > 0.5"]}
 
 
-def saved(tmp_path: Path) -> dict:
-    return json.loads((tmp_path / "weather-alert" / f"{DATE}.json").read_text())
+def report(examined, alerts=(), unavailable=(), task=TASK):
+    return build_output({"task": task, "examined": list(examined), "alerts": list(alerts), "unavailable": list(unavailable)}, ReportInput)
 
 
-def test_report_alerts_merges_each_call_by_city_and_counts_its_own_entries(tmp_path: Path) -> None:
-    cairo = {"city": "Cairo", "values": {"max_temp": 98.0}, "matched": ["max_temp >= 95"]}
-    first = report_alerts(report(DATE, NAMES[:10], alerts=[cairo]), tmp_path)
-    assert first.path == f"weather-alert/{DATE}.json" and (first.alerts, first.unavailable, first.examined) == (1, 0, 10)
-    marker = json.loads((tmp_path / "weather-alert" / "run.json").read_text())
+def saved(tmp_path: Path, date: str = DATE) -> dict:
+    return json.loads((tmp_path / "reports" / f"{date}.json").read_text())
+
+
+def returned(out) -> dict:
+    """A ReportOutput's merged report as JSON."""
+    return plain_output(out.report)
+
+
+def test_report_alerts_merges_each_call_by_city_and_returns_the_merged_report(tmp_path: Path) -> None:
+    cairo = {"city": "Cairo", "values": {"max_temp": 98.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}
+    first = report_alerts(report(NAMES[:10], alerts=[cairo]), tmp_path)
+    assert first.path == f"reports/{DATE}.json" and (first.examined, first.complete) == (10, False)
+    assert returned(first) == {"task": TASK, "alerts": [cairo], "unavailable": []}
+    marker = json.loads((tmp_path / "reports" / "run.json").read_text())
     assert marker["run"] == RUN
-    assert saved(tmp_path) == {"date": DATE, "run": RUN, "examined": NAMES[:10], "alerts": [cairo], "unavailable": []}
+    assert saved(tmp_path) == {"date": DATE, "run": RUN, "task": TASK, "examined": NAMES[:10], "alerts": [cairo], "unavailable": []}
     lima = {"city": "Lima", "variables": ["rain"]}
-    second = report_alerts(report(DATE, NAMES[10:20], unavailable=[lima]), tmp_path)
-    assert (second.alerts, second.unavailable, second.examined) == (0, 1, 10)  # this call's entries, not totals
+    second = report_alerts(report(NAMES[10:20], unavailable=[lima]), tmp_path)
+    assert (second.examined, second.complete) == (20, False)
+    assert returned(second) == {"task": TASK, "alerts": [cairo], "unavailable": [lima]}
     # a later call restates the cities it examines: Cairo's values replaced, nothing else touched
-    fixed = {**cairo, "values": {"max_temp": 98.8}}
-    third = report_alerts(report(DATE, NAMES[20:30] + ["Cairo"], alerts=[fixed]), tmp_path)
-    assert (third.alerts, third.unavailable, third.examined) == (1, 0, 11)
-    assert saved(tmp_path) == {"date": DATE, "run": RUN, "examined": NAMES, "alerts": [fixed], "unavailable": [lima]}
+    fixed = {**cairo, "values": {"max_temp": 98.8, "rain": 0.0}}
+    third = report_alerts(report(NAMES[20:30] + ["Cairo"], alerts=[fixed]), tmp_path)
+    assert (third.examined, third.complete) == (30, True)
+    assert returned(third) == {"task": TASK, "alerts": [fixed], "unavailable": [lima]}
+    assert saved(tmp_path) == {"date": DATE, "run": RUN, "task": TASK, "examined": NAMES, "alerts": [fixed], "unavailable": [lima]}
     # an examined city with no entry has no alert: Cairo's goes; Lima turns from unavailable into an alert
-    lima_alert = {"city": "Lima", "values": {"max_temp": 70.0}, "matched": []}
-    fourth = report_alerts(report(DATE, ["Cairo", "Lima"], alerts=[lima_alert]), tmp_path)
-    assert (fourth.alerts, fourth.unavailable, fourth.examined) == (1, 0, 2)
+    lima_alert = {"city": "Lima", "values": {"max_temp": 70.0, "rain": 0.6}, "matched": ["rain > 0.5"]}
+    fourth = report_alerts(report(["Cairo", "Lima"], alerts=[lima_alert]), tmp_path)
+    assert (fourth.examined, fourth.complete) == (30, True)
+    assert returned(fourth) == {"task": TASK, "alerts": [lima_alert], "unavailable": []}
     assert saved(tmp_path)["alerts"] == [lima_alert] and saved(tmp_path)["unavailable"] == []
-    assert sorted(path.name for path in (tmp_path / "weather-alert").iterdir()) == [f"{DATE}.json", "run.json"]
+    assert sorted(path.name for path in (tmp_path / "reports").iterdir()) == [f"{DATE}.json", "run.json"]
+
+
+def test_report_alerts_keeps_the_task_as_given_and_merges_under_it_whatever_its_spelling(tmp_path: Path) -> None:
+    spelled = {**TASK, "conditions": ["max_temp>=95.0", "rain > .5"]}
+    cairo = {"city": "Cairo", "values": {"max_temp": 98.0, "rain": 0.0}, "matched": ["max_temp>=95.0"]}
+    first = report_alerts(report(NAMES[:10], alerts=[cairo]), tmp_path)
+    second = report_alerts(report(NAMES[10:30], task=spelled), tmp_path)
+    assert (second.examined, second.complete) == (30, True)
+    assert returned(second) == {"task": spelled, "alerts": [cairo], "unavailable": []}
+    assert saved(tmp_path)["task"] == spelled and returned(first)["task"] == TASK
 
 
 @pytest.mark.parametrize(
     "leftover",
     [
         "not json at all",
-        json.dumps({"date": DATE, "alerts": [{"city": "Lima", "values": {}, "matched": []}], "unavailable": []}),  # an older version's shape
-        json.dumps({"date": DATE, "run": "deadbeefdeadbeef", "examined": NAMES, "alerts": [{"city": "Lima", "values": {}, "matched": []}], "unavailable": []}),  # another run's
-        json.dumps({"date": "2026-07-01", "run": RUN, "examined": NAMES, "alerts": [], "unavailable": []}),  # another date's content
+        json.dumps({"date": DATE, "run": "deadbeefdeadbeef", "examined": NAMES, "alerts": [], "unavailable": []}),  # an older version's shape
+        json.dumps({"date": DATE, "run": "deadbeefdeadbeef", "task": TASK, "examined": NAMES, "alerts": [{"city": "Lima", "values": {"max_temp": 1.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}], "unavailable": []}),  # another run's
+        json.dumps({"date": "2026-07-01", "run": RUN, "task": {**TASK, "date": "2026-07-01"}, "examined": NAMES, "alerts": [], "unavailable": []}),  # another date's content
+        json.dumps({"date": DATE, "run": RUN, "task": {**TASK, "match": "all"}, "examined": NAMES, "alerts": [], "unavailable": []}),  # another task's
     ],
 )
 def test_the_first_call_of_a_run_replaces_a_leftover_file(tmp_path: Path, leftover: str) -> None:
-    (tmp_path / "weather-alert").mkdir()
-    (tmp_path / "weather-alert" / f"{DATE}.json").write_text(leftover)
-    (tmp_path / "weather-alert" / "run.json").write_text(json.dumps({"run": "deadbeefdeadbeef"}))
-    out = report_alerts(report(DATE, ["Athens"]), tmp_path)
-    assert (out.alerts, out.unavailable, out.examined) == (0, 0, 1)
-    assert saved(tmp_path) == {"date": DATE, "run": RUN, "examined": ["Athens"], "alerts": [], "unavailable": []}
-    assert json.loads((tmp_path / "weather-alert" / "run.json").read_text())["run"] == RUN
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / f"{DATE}.json").write_text(leftover)
+    (tmp_path / "reports" / "run.json").write_text(json.dumps({"run": "deadbeefdeadbeef"}))
+    out = report_alerts(report(["Athens"]), tmp_path)
+    assert (out.examined, out.complete) == (1, False)
+    assert returned(out) == {"task": TASK, "alerts": [], "unavailable": []}
+    assert saved(tmp_path) == {"date": DATE, "run": RUN, "task": TASK, "examined": ["Athens"], "alerts": [], "unavailable": []}
+    assert json.loads((tmp_path / "reports" / "run.json").read_text())["run"] == RUN
 
 
 @pytest.mark.parametrize(
@@ -184,23 +208,32 @@ def test_the_first_call_of_a_run_replaces_a_leftover_file(tmp_path: Path, leftov
         (NAMES + ["Atlantis"], [], [], "1 to 30"),
         (["Athens", "Athens"], [], [], "1 to 30"),
         (["Atlantis"], [], [], "unknown city Atlantis"),
-        (["Athens"], [{"city": "Cairo", "values": {}, "matched": []}], [], "must be listed in examined"),
-        (["Athens", "Cairo"], [{"city": "Cairo", "values": {}, "matched": []}], [{"city": "Cairo", "variables": ["rain"]}], "once"),
+        (["Athens"], [{"city": "Cairo", "values": {"max_temp": 1.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}], [], "must be listed in examined"),
+        (["Athens", "Cairo"], [{"city": "Cairo", "values": {"max_temp": 1.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}], [{"city": "Cairo", "variables": ["rain"]}], "once"),
+        (["Cairo"], [{"city": "Cairo", "values": {"max_temp": 1.0}, "matched": ["max_temp >= 95"]}], [], "exactly the variables"),
+        (["Cairo"], [{"city": "Cairo", "values": {"max_temp": 1.0, "rain": 0.0}, "matched": ["wind >= 1"]}], [], "does not have"),
+        (["Cairo"], [{"city": "Cairo", "values": {"max_temp": 1.0, "rain": 0.0}, "matched": []}], [], "at least one"),
+        (["Cairo"], [], [{"city": "Cairo", "variables": ["wind"]}], "variables must name"),
     ],
 )
 def test_report_alerts_refuses_bad_calls(tmp_path: Path, examined, alerts, unavailable, error: str) -> None:
     with pytest.raises(ValueError, match=error):
-        report_alerts(report(DATE, examined, alerts, unavailable), tmp_path)
+        report_alerts(report(examined, alerts, unavailable), tmp_path)
     with pytest.raises(ValueError, match="outside the snapshot"):
-        report_alerts(report("2027-01-01", ["Athens"]), tmp_path)
+        report_alerts(report(["Athens"], task={**TASK, "date": "2027-01-01"}), tmp_path)
+    with pytest.raises(ValueError, match="not a condition"):
+        report_alerts(report(["Athens"], task={**TASK, "conditions": ["hot > 1"]}), tmp_path)
+    assert not (tmp_path / "reports").exists()
 
 
 def test_concurrent_calls_merge_without_losing_entries(tmp_path: Path) -> None:
     """Several report_alerts calls of one turn run at once: every call's cities land in the file."""
     chunks = [NAMES[start : start + 5] for start in range(0, 30, 5)]
-    calls = [report(DATE, chunk, alerts=[{"city": chunk[0], "values": {"max_temp": 90.0}, "matched": []}]) for chunk in chunks]
+    calls = [report(chunk, alerts=[{"city": chunk[0], "values": {"max_temp": 99.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}]) for chunk in chunks]
     with ThreadPoolExecutor(max_workers=6) as pool:
         outputs = list(pool.map(lambda call: report_alerts(call, tmp_path), calls))
-    assert all((out.alerts, out.examined) == (1, 5) for out in outputs)
+    assert all(5 <= out.examined <= 30 and out.complete == (out.examined == 30) for out in outputs)
+    assert all(chunk[0] in {a["city"] for a in returned(out)["alerts"]} for chunk, out in zip(chunks, outputs, strict=True))
+    assert max(out.examined for out in outputs) == 30
     final = saved(tmp_path)
     assert final["examined"] == NAMES and sorted(a["city"] for a in final["alerts"]) == sorted(chunk[0] for chunk in chunks)

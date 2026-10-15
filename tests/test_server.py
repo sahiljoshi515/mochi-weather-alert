@@ -39,6 +39,9 @@ def test_offers_every_tool_with_its_contract_schemas(tmp_path: Path) -> None:
         assert offered[tool.value].outputSchema == output_schema(made)
 
 
+TASK = {"date": DATE, "match": "any", "temperature_unit": "F", "wind_unit": "mph", "rain_unit": "in", "conditions": ["max_temp >= 95"]}
+
+
 def test_runs_a_gold_path_over_stdio(tmp_path: Path) -> None:
     async def script(session):
         listed = await session.call_tool("list_cities", {"date": DATE})
@@ -48,19 +51,27 @@ def test_runs_a_gold_path_over_stdio(tmp_path: Path) -> None:
         assert not daily.isError and len(daily.structuredContent["cities"]) == 10
         hours = await session.call_tool("get_hourly", {"city": "Santiago", "date": DATE})
         assert not hours.isError and len(hours.structuredContent["rows"]) == 23
-        report = {"date": DATE, "examined": ["Cairo"], "alerts": [{"city": "Cairo", "values": {"max_temp": 98.8}, "matched": ["max_temp >= 95"]}], "unavailable": []}
-        saved = await session.call_tool("report_alerts", report)
-        assert not saved.isError and saved.structuredContent == {"path": f"weather-alert/{DATE}.json", "alerts": 1, "unavailable": 0, "examined": 1}
+        call = {"task": TASK, "examined": ["Cairo"], "alerts": [{"city": "Cairo", "values": {"max_temp": 98.8}, "matched": ["max_temp >= 95"]}], "unavailable": []}
+        saved = await session.call_tool("report_alerts", call)
+        assert not saved.isError
+        assert saved.structuredContent == {
+            "path": f"reports/{DATE}.json",
+            "examined": 1,
+            "complete": False,
+            "report": {"task": TASK, "alerts": call["alerts"], "unavailable": []},
+        }
         unknown = await session.call_tool("get_daily", {"cities": ["Atlantis"], "date": DATE})
         assert unknown.isError and "unknown city Atlantis" in unknown.content[0].text
         bad_date = await session.call_tool("list_cities", {"date": "2026-12-25"})
         assert bad_date.isError and "outside the snapshot" in bad_date.content[0].text
-        return report
+        bad_call = await session.call_tool("report_alerts", {**call, "alerts": [{**call["alerts"][0], "matched": ["wind > 1"]}]})
+        assert bad_call.isError and "does not have" in bad_call.content[0].text
+        return call
 
-    report = anyio.run(talk, tmp_path, script)
-    saved = json.loads((tmp_path / "weather-alert" / f"{DATE}.json").read_text())
-    marker = json.loads((tmp_path / "weather-alert" / "run.json").read_text())
-    assert saved == {**report, "run": marker["run"]}
+    call = anyio.run(talk, tmp_path, script)
+    saved = json.loads((tmp_path / "reports" / f"{DATE}.json").read_text())
+    marker = json.loads((tmp_path / "reports" / "run.json").read_text())
+    assert saved == {"date": DATE, "run": marker["run"], "task": TASK, "examined": ["Cairo"], "alerts": call["alerts"], "unavailable": []}
     assert isinstance(marker["run"], str) and len(marker["run"]) == 16
 
 
@@ -69,7 +80,7 @@ def test_the_server_writes_the_run_marker_when_it_starts(tmp_path: Path) -> None
         return await session.list_tools()
 
     anyio.run(talk, tmp_path, script)
-    marker = json.loads((tmp_path / "weather-alert" / "run.json").read_text())
+    marker = json.loads((tmp_path / "reports" / "run.json").read_text())
     assert isinstance(marker["run"], str) and marker["run"].strip() and "started" in marker
 
 

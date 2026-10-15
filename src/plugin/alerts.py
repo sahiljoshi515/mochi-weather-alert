@@ -1,4 +1,4 @@
-"""The tools: the pinned answer key, the city list, a day's aggregates, a day's hours, and the report."""
+"""The tools: the pinned answer key, the city list, a day's aggregates, a day's hours, and the merged report."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from slimconfig import plain_output
 from contract import (
     Alert,
     AlertInput,
+    AlertReportOutput,
     CitiesInput,
     CitiesOutput,
     CityDay,
@@ -38,13 +39,18 @@ from plugin.rules import (
     DayMetrics,
     Units,
     aggregate,
+    canonical_task,
     date_problem,
     evaluate,
+    judgement_problem,
     parse_conditions,
+    plain_task,
     report_problem,
+    task_problem,
 )
 
-REPORT_DIR = "weather-alert"
+# The report lives in the run's folder, which is the member's own folder for this plugin.
+REPORT_DIR = "reports"
 RUN_MARKER = "run.json"
 # This plugin process's run: the server records it in the workspace at its start, every report carries
 # it, and a report left by an earlier run (another token, or an older shape) is replaced, never merged.
@@ -185,7 +191,7 @@ def run_marker_path(workspace: Path) -> Path:
 
 
 def write_run_marker(workspace: Path) -> str:
-    """Record this process's run token at weather-alert/run.json (the server does it when it starts)."""
+    """Record this process's run token at reports/run.json (the server does it when it starts)."""
     path = run_marker_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     write_atomic(path, json.dumps({"run": RUN, "started": datetime.now(UTC).isoformat(timespec="seconds")}, indent=2) + "\n")
@@ -203,25 +209,32 @@ def marker_is_current(workspace: Path) -> bool:
     return isinstance(found, dict) and found.get("run") == RUN
 
 
-def mergeable_report(path: Path, date: str) -> dict | None:
-    """The report this run already wrote at ``path``, or None when there is none or the file is a
-    leftover (not a well-formed report, another date, or another run's): the call then starts afresh."""
+def mergeable_report(path: Path, task: dict) -> dict | None:
+    """The report this run already wrote at ``path`` for ``task`` (a plain task), or None when there is
+    none or the file is a leftover (not a well-formed report, another task, or another run's): the
+    call then starts afresh."""
     if not path.is_file():
         return None
     try:
         found = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
         return None
-    if report_problem(found) or found["date"] != date or found["run"] != RUN:
+    if report_problem(found) or found["run"] != RUN or canonical_task(found["task"]) != canonical_task(task):
         return None
     return found
 
 
 def report_alerts(given: ReportInput, workspace: Path) -> ReportOutput:
-    """Merge this call's judgement into weather-alert/<date>.json: every examined city is restated by the
+    """Merge this call's judgement into reports/<date>.json: every examined city is restated by the
     call (its earlier entries go, this call's entries come in; no entry means no alert), every other
-    city's entries are kept. The merge is atomic per call; the counts returned are this call's own."""
-    date = checked_date(given.date)
+    city's entries are kept. The merge is atomic per call, and the answer is the merged report as it
+    stands right after it: how many cities are examined, whether that is every city, and the report
+    itself, which the agent submits once it is complete."""
+    task = plain_task(given.task)
+    problem = task_problem(task)
+    if problem:
+        raise ValueError(problem)
+    date = task["date"]
     data = snapshot()
     examined = given.examined
     if not 1 <= len(examined) <= MAX_REPORT_ENTRIES or len(set(examined)) != len(examined):
@@ -230,25 +243,33 @@ def report_alerts(given: ReportInput, workspace: Path) -> ReportOutput:
     if unknown:
         known = ", ".join(city.name for city in data.cities)
         raise ValueError(f"unknown city {', '.join(unknown)}; the cities are {known}")
-    named = [alert.city for alert in given.alerts] + [entry.city for entry in given.unavailable]
-    if len(set(named)) != len(named):
-        raise ValueError("a city may appear once, as an alert or as unavailable")
-    outside = [name for name in named if name not in set(examined)]
-    if outside:
-        raise ValueError(f"{', '.join(outside)} must be listed in examined to be reported")
+    given_plain = plain_output(given)
+    problem = judgement_problem(task, list(examined), given_plain["alerts"], given_plain["unavailable"])
+    if problem:
+        raise ValueError(problem)
     path = workspace.resolve() / REPORT_DIR / f"{date}.json"
     covered = set(examined)
-    given_plain = plain_output(given)
     with LOCK:
         if not marker_is_current(workspace):
             write_run_marker(workspace)
-        earlier = mergeable_report(path, date) or {"date": date, "run": RUN, "examined": [], "alerts": [], "unavailable": []}
+        earlier = mergeable_report(path, task) or {"date": date, "run": RUN, "task": task, "examined": [], "alerts": [], "unavailable": []}
         merged = {
             "date": date,
             "run": RUN,
+            "task": task,
             "examined": [city.name for city in data.cities if city.name in covered | set(earlier["examined"])],
             "alerts": [entry for entry in earlier["alerts"] if entry["city"] not in covered] + given_plain["alerts"],
             "unavailable": [entry for entry in earlier["unavailable"] if entry["city"] not in covered] + given_plain["unavailable"],
         }
         write_atomic(path, json.dumps(merged, indent=2) + "\n")
-    return ReportOutput(path=report_path(date), alerts=len(given.alerts), unavailable=len(given.unavailable), examined=len(examined))
+    report = AlertReportOutput(
+        task=given.task,
+        alerts=[Alert(city=entry["city"], values=dict(entry["values"]), matched=list(entry["matched"])) for entry in merged["alerts"]],
+        unavailable=[Unavailable(city=entry["city"], variables=list(entry["variables"])) for entry in merged["unavailable"]],
+    )
+    return ReportOutput(
+        path=report_path(date),
+        examined=len(merged["examined"]),
+        complete=len(merged["examined"]) == len(data.cities),
+        report=report,
+    )

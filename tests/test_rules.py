@@ -11,16 +11,21 @@ from plugin.rules import (
     DayMetrics,
     Units,
     aggregate,
+    canonical_task,
     convert,
     date_problem,
     evaluate,
+    expected_output,
     holds,
+    judgement_problem,
     metrics_from_plain,
     needed_variables,
     parse_condition,
     parse_conditions,
     plain_report,
+    report_problem,
     round_half_up,
+    task_problem,
 )
 
 METRIC = Units("C", "kmh", "mm")
@@ -250,12 +255,103 @@ def test_a_missing_needed_variable_makes_the_city_unavailable() -> None:
     assert only_rain.unavailable == {"Other": ("rain",)}
 
 
-def test_plain_report_is_the_report_file_shape() -> None:
+TASK = {"date": "2026-08-01", "match": "all", "temperature_unit": "F", "wind_unit": "mph", "rain_unit": "in", "conditions": ["max_temp >= 95"]}
+
+
+def test_plain_report_and_expected_output_are_the_file_and_submission_shapes() -> None:
     days = [metrics("A", max_temp="35.0"), metrics("B", max_temp="10.0", missing=["temperature_2m"])]
-    report = plain_report("2026-08-01", evaluate(days, parse_conditions(["max_temp >= 95"]), "all", IMPERIAL))
-    assert report == {
+    expected = evaluate(days, parse_conditions(["max_temp >= 95"]), "all", IMPERIAL)
+    assert plain_report(TASK, expected) == {
         "date": "2026-08-01",
+        "task": TASK,
         "examined": ["A", "B"],
         "alerts": [{"city": "A", "values": {"max_temp": 95.0}, "matched": ["max_temp >= 95"]}],
         "unavailable": [{"city": "B", "variables": ["max_temp"]}],
     }
+    assert expected_output(TASK, expected) == {
+        "task": TASK,
+        "alerts": [{"city": "A", "values": {"max_temp": 95.0}, "matched": ["max_temp >= 95"]}],
+        "unavailable": [{"city": "B", "variables": ["max_temp"]}],
+    }
+
+
+# ----- The task, a judgement and the report file -----
+
+
+@pytest.mark.parametrize(
+    ("task", "problem"),
+    [
+        (TASK, None),
+        ({**TASK, "conditions": ["max_temp>=95.00", "rain > .5"]}, None),
+        ({**TASK, "date": "2026-10-01"}, "outside the snapshot"),
+        ({**TASK, "match": "some"}, "match must be all or any"),
+        ({**TASK, "temperature_unit": "K"}, "temperature_unit"),
+        ({**TASK, "wind_unit": "knots"}, "wind_unit"),
+        ({**TASK, "rain_unit": "cm"}, "rain_unit"),
+        ({**TASK, "conditions": []}, "1 to 6"),
+        ({**TASK, "conditions": ["hot > 1"]}, "not a condition"),
+        ({key: value for key, value in TASK.items() if key != "match"}, "task must hold"),
+        ({**TASK, "extra": 1}, "task must hold"),
+        ("not a task", "task must hold"),
+    ],
+)
+def test_checks_a_task(task, problem) -> None:
+    found = task_problem(task)
+    assert (found is None) == (problem is None), found
+    if problem:
+        assert problem in found
+
+
+def test_canonical_tasks_compare_equal_when_they_mean_the_same() -> None:
+    spelled = {**TASK, "conditions": ["max_temp>=95.00"]}
+    assert canonical_task(spelled) == canonical_task(TASK) == TASK
+    assert canonical_task({**TASK, "match": "any"}) != canonical_task(TASK)
+    assert canonical_task({**TASK, "conditions": ["max_temp > 95"]}) != canonical_task(TASK)
+
+
+ANY = {**TASK, "match": "any", "conditions": ["max_temp >= 95", "rain > 0.5"]}
+HOT = {"city": "A", "values": {"max_temp": 95.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}
+
+
+@pytest.mark.parametrize(
+    ("task", "examined", "alerts", "unavailable", "problem"),
+    [
+        (ANY, ["A", "B"], [HOT], [{"city": "B", "variables": ["rain"]}], None),
+        (ANY, None, [HOT], [], None),
+        (ANY, ["A"], [{**HOT, "matched": ["max_temp>=95.0"]}], [], None),
+        (ANY, ["A"], [{**HOT, "values": {"max_temp": 95.0}}], [], "exactly the variables"),
+        (ANY, ["A"], [{**HOT, "values": {"max_temp": 95.0, "rain": 0.0, "wind": 1.0}}], [], "exactly the variables"),
+        (ANY, ["A"], [{**HOT, "values": {"max_temp": "95"}}], [], "values must map"),
+        (ANY, ["A"], [{**HOT, "matched": []}], [], "at least one condition"),
+        (ANY, ["A"], [{**HOT, "matched": ["wind > 1"]}], [], "does not have"),
+        (ANY, ["A"], [{**HOT, "matched": ["hot"]}], [], "not a condition"),
+        (ANY, ["A"], [{**HOT, "matched": ["max_temp >= 95", "max_temp >= 95.0"]}], [], "listed twice"),
+        ({**ANY, "match": "all"}, ["A"], [HOT], [], "every condition"),
+        ({**ANY, "match": "all"}, ["A"], [{**HOT, "values": {"max_temp": 95.0, "rain": 0.6}, "matched": ["rain > 0.5", "max_temp >= 95"]}], [], None),
+        (ANY, ["A"], [], [{"city": "A", "variables": ["wind"]}], "variables must name"),
+        (ANY, ["A"], [], [{"city": "A", "variables": []}], "variables must name"),
+        (ANY, ["A"], [], [{"city": "A", "variables": ["rain", "rain"]}], "distinct"),
+        (ANY, ["A"], [HOT], [{"city": "A", "variables": ["rain"]}], "once"),
+        (ANY, ["B"], [HOT], [], "must be listed in examined"),
+        (ANY, ["A", "A"], [HOT], [], "distinct city names"),
+        (ANY, ["A"], "nope", [], "must be lists"),
+        (ANY, ["A"], [{"city": "A"}], [], "each alert must hold"),
+        (ANY, ["A"], [], [{"city": "A"}], "each unavailable entry must hold"),
+    ],
+)
+def test_checks_a_judgement_under_its_task(task, examined, alerts, unavailable, problem) -> None:
+    found = judgement_problem(task, examined, alerts, unavailable)
+    assert (found is None) == (problem is None), found
+    if problem:
+        assert problem in found
+
+
+def test_checks_a_report_file() -> None:
+    report = {"date": "2026-08-01", "run": "0123456789abcdef", "task": ANY, "examined": ["A"], "alerts": [HOT], "unavailable": []}
+    assert report_problem(report) is None
+    assert "must hold date, run, task" in report_problem({key: value for key, value in report.items() if key != "task"})
+    assert "run must be" in report_problem({**report, "run": ""})
+    assert "task:" in report_problem({**report, "task": {**ANY, "match": "some"}})
+    assert "not its task's" in report_problem({**report, "date": "2026-08-02"})
+    assert "must be listed in examined" in report_problem({**report, "examined": ["B"]})
+    assert report_problem("nope") is not None

@@ -56,7 +56,19 @@
     {
       "tool": "report_alerts",
       "arguments": {
-        "date": "2026-07-07",
+        "task": {
+          "date": "2026-07-07",
+          "match": "any",
+          "temperature_unit": "F",
+          "wind_unit": "mph",
+          "rain_unit": "in",
+          "conditions": [
+            "max_temp >= 101.3",
+            "humidity >= 80",
+            "rain > 0.5",
+            "wind >= 20"
+          ]
+        },
         "examined": [
           "Athens",
           "Auckland",
@@ -91,7 +103,12 @@
         ],
         "alerts": [],
         "unavailable": []
-      }
+      },
+      "save_as": "last"
+    },
+    {
+      "tool": "submit",
+      "arguments": "$ref:last.report"
     }
   ],
   "answer": "No city crossed the thresholds.",

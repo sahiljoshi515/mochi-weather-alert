@@ -1,0 +1,12 @@
+/* Styles for this plugin's renderer (renderers.js), the alert report, over the kit's (kit/kit.css).
+   They apply only inside the renderer's output, in its own shadow root, and use only the kit's
+   variables, so they follow the host's light and dark themes. */
+
+.alert-report { display: grid; gap: 10px; min-width: 0; }
+.alert-summary { display: flex; align-items: center; gap: 6px; font-weight: 600; overflow-wrap: anywhere; }
+.alert-summary .icon { color: var(--accent); flex: none; }
+.alert-rules { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.alert-matched { display: flex; flex-wrap: wrap; gap: 4px; }
+.alert-unavailable { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--warn-soft); }
+.alert-unavailable .icon { color: var(--warn); vertical-align: -2px; }
+.alert-unavailable-list { margin: 0; padding-left: 18px; font-size: 13px; }

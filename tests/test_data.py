@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from plugin.data import DATA, snapshot
-from plugin.rules import MAX_REPORT_ENTRIES, SNAPSHOT_END, SNAPSHOT_START, SOURCE_VARIABLES, parse_condition
+from plugin.rules import CITY_COUNT, MAX_REPORT_ENTRIES, SNAPSHOT_END, SNAPSHOT_START, SOURCE_VARIABLES
 
 ROOT = Path(__file__).resolve().parents[1]
 DAYS = 92
@@ -26,7 +26,7 @@ def test_the_verifier_and_the_server_share_one_rules_module() -> None:
 def test_the_snapshot_covers_every_city_and_day() -> None:
     data = snapshot()
     names = [city.name for city in data.cities]
-    assert len(names) == 30 == MAX_REPORT_ENTRIES and names == sorted(names) and len(set(names)) == 30
+    assert len(names) == 30 == MAX_REPORT_ENTRIES == CITY_COUNT and names == sorted(names) and len(set(names)) == 30
     assert {"Santiago", "Auckland"} <= set(names)
     lengths = Counter()
     for city in data.cities:
@@ -75,7 +75,7 @@ def test_values_are_plausible_decimals() -> None:
     assert provenance["missing_values"] == {variable: missing.get(variable, 0) for variable in SOURCE_VARIABLES}
 
 
-def test_provenance_matches_the_files_and_the_page() -> None:
+def test_provenance_matches_the_files() -> None:
     provenance = json.loads((DATA / "provenance.json").read_text(encoding="utf-8"))
     assert (provenance["start"], provenance["end"]) == (SNAPSHOT_START, SNAPSHOT_END)
     for name, digest in provenance["sha256"].items():
@@ -89,53 +89,42 @@ def test_provenance_matches_the_files_and_the_page() -> None:
     assert (DATA / "hourly.csv.gz").stat().st_size <= 2 * 1024 * 1024
     cities = json.loads((DATA / "cities.json").read_text(encoding="utf-8"))
     assert [city["timezone"] for city in cities] == [provenance["cities"][city["name"]]["timezone"] for city in cities]
-    page = (ROOT / "ui" / "snapshot.js").read_text(encoding="utf-8")
-    shown = json.loads(page[page.index("{") : page.rindex("}") + 1])
-    assert shown["start"] == SNAPSHOT_START and shown["end"] == SNAPSHOT_END
-    assert shown["fetchedAt"] == provenance["fetched_at"]
-    assert shown["shortDays"] == provenance["short_days"] and shown["longDays"] == provenance["long_days"]
-    assert shown["cities"] == [{"name": c["name"], "country": c["country"], "timezone": c["timezone"]} for c in cities]
-
-
-SAMPLES = [
-    "max_temp >= 95", "max_temp>=95.00", "  rain > .5 ", "wind <= +007.10", "humidity < 100", "min_temp < -0.00",
-    "min_temp <= -3.25", "temp >= 3", "max_temp = 3", "max_temp >= 1.234", "max_temp >=", ">= 3", "", "MAX_TEMP >= 3",
-    "rain>0", "rain > 0.0", "humidity >= 90 ", "wind < 5.5.5",
-]
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-def test_the_page_grammar_agrees_with_the_python_grammar() -> None:
-    script = (
-        "const { parseCondition, conditionProblem } = await import(process.argv[1]);"
-        "const samples = JSON.parse(process.argv[2]);"
-        "const out = samples.map((s) => parseCondition(s)?.text ?? null);"
-        "out.push(conditionProblem('rain > 0.0', ['rain > 0']), conditionProblem('rain > 1', ['rain > 0']));"
-        "console.log(JSON.stringify(out));"
-    )
-    url = (ROOT / "ui" / "grammar.js").as_uri()
-    completed = subprocess.run(["node", "--input-type=module", "-e", script, "--", url, json.dumps(SAMPLES)], capture_output=True, text=True, timeout=60, check=False)
-    assert completed.returncode == 0, completed.stderr
-    found = json.loads(completed.stdout)
-    expected = []
-    for sample in SAMPLES:
-        try:
-            expected.append(parse_condition(sample).text)
-        except ValueError:
-            expected.append(None)
-    assert found[: len(SAMPLES)] == expected
-    assert found[len(SAMPLES)] == "That rule means the same as rain > 0." and found[len(SAMPLES) + 1] is None
 
 
 PAGE_CHECK = Path.home() / "mochi-dev" / "harness" / "page_check.sh"
 
 
+def gold_output() -> dict:
+    """The report the gold case's one report_alerts call makes, as the task's output."""
+    case = json.loads((ROOT / "tests" / "cases" / "gold.json").read_text(encoding="utf-8"))
+    call = next(step for step in case["steps"] if step.get("tool") == "report_alerts")["arguments"]
+    return {"task": call["task"], "alerts": call["alerts"], "unavailable": [{"city": "Cairo", "variables": ["humidity"]}]}
+
+
 @pytest.mark.skipif(shutil.which("node") is None or not PAGE_CHECK.is_file(), reason="needs node and the lab's page_check.sh")
-def test_every_page_module_evaluates_with_the_served_kit() -> None:
-    """The browser evaluates ui/*.js with NanoAgent's kit; `node --check` alone misses duplicate exports
-    and bad imports, so the lab's page check loads every module the way the page does."""
-    completed = subprocess.run(["bash", str(PAGE_CHECK), str(ROOT)], capture_output=True, text=True, timeout=120, check=False)
-    lines = completed.stdout.strip().splitlines()
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert lines and all(": OK" in line for line in lines), completed.stdout
-    assert any(line.startswith("app.js: OK") and "default is function" in line for line in lines)
+def test_the_renderer_draws_the_report_with_the_served_kit(tmp_path: Path) -> None:
+    """The browser evaluates ui/renderers.js with NanoAgent's kit and draws each output class with it;
+    `node --check` alone misses bad imports and a renderer that throws, so the lab's page check loads
+    the module the way the page does and draws the gold report and an empty one."""
+    output = gold_output()
+    (tmp_path / "gold.json").write_text(json.dumps(output), encoding="utf-8")
+    (tmp_path / "empty.json").write_text(json.dumps({**output, "alerts": [], "unavailable": []}), encoding="utf-8")
+    for name, rows, words in (("gold", 1 + len(output["alerts"]), ["Dubai", "101.3", "High ≥ 101.3 °F", "Cairo", "humidity"]), ("empty", 0, ["No city crossed"])):
+        completed = subprocess.run(["bash", str(PAGE_CHECK), str(ROOT), f"AlertReportOutput={tmp_path / name}.json"], capture_output=True, text=True, timeout=120, check=False)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        lines = completed.stdout.strip().splitlines()
+        assert any(line.startswith("renderers.js: OK") and "default is object" in line for line in lines), completed.stdout
+        assert any(line.startswith("kit/boot.js: OK") for line in lines), completed.stdout
+        assert any(line.startswith(f"render AlertReportOutput: OK ({rows} table rows") for line in lines), completed.stdout
+        assert all(": FAILED" not in line for line in lines), completed.stdout
+        for word in words:
+            assert word in completed.stdout, word
+
+
+def test_the_renderer_names_no_page_host_or_network_global() -> None:
+    """Rule 8: a renderer draws only its output, with the kit's modules (NanoAgent checks this too)."""
+    for script in (ROOT / "ui").glob("*.js"):
+        code = script.read_text(encoding="utf-8")
+        for name in ("document", "window", "globalThis", "fetch", "localStorage", "parent", "location"):
+            assert not any(part.strip().startswith(name) for part in code.replace("(", " ").split()), f"{script.name} uses {name}"
+    assert sorted(path.name for path in (ROOT / "ui").iterdir() if not path.name.startswith(".")) == ["renderers.css", "renderers.js"]

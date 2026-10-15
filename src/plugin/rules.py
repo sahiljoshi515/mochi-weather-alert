@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import Enum
 from fractions import Fraction
 
 SNAPSHOT_START = "2026-07-01"
@@ -32,8 +33,10 @@ WIND_UNITS = ("kmh", "mph", "ms")
 RAIN_UNITS = ("mm", "in")
 MIN_CONDITIONS = 1
 MAX_CONDITIONS = 6
-MAX_CITIES_PER_CALL = 30
-MAX_REPORT_ENTRIES = 30  # the snapshot's cities: a report names each at most once
+CITY_COUNT = 30  # the snapshot's cities
+MAX_CITIES_PER_CALL = CITY_COUNT
+MAX_REPORT_ENTRIES = CITY_COUNT  # a report names each city at most once
+CHUNK = 10  # cities per report_alerts call on the prescribed path
 PLACES = 1  # reported values carry one decimal
 DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 CONDITION = re.compile(r"^\s*(max_temp|min_temp|rain|wind|humidity)\s*(>=|<=|>|<)\s*([+-]?(?:\d+(?:\.\d{1,2})?|\.\d{1,2}))\s*$")
@@ -293,23 +296,56 @@ def evaluate(metrics: list[DayMetrics], conditions: list[Condition], match: str,
     return Expected(tuple(alerts), unavailable, tuple(day.city for day in metrics))
 
 
-def plain_report(date: str, expected: Expected) -> dict:
-    """``expected`` as the report's JSON (without the run marker report_alerts adds): what a perfect
-    answer says."""
+# ----- The task, the report file and the submitted report -----
+
+TASK_KEYS = ("date", "match", "temperature_unit", "wind_unit", "rain_unit", "conditions")
+REPORT_KEYS = ("date", "run", "task", "examined", "alerts", "unavailable")
+
+
+def plain_task(task) -> dict:
+    """A task input (a contract AlertInput, whose choices are Enums) as the plain JSON the report
+    file and the submitted report carry."""
+
+    def plain(value):
+        return value.value if isinstance(value, Enum) else value
+
     return {
-        "date": date,
-        "examined": list(expected.examined),
-        "alerts": [
-            {"city": alert.city, "values": {k: float(v) for k, v in alert.values.items()}, "matched": list(alert.matched)}
-            for alert in expected.alerts
-        ],
-        "unavailable": [{"city": city, "variables": list(variables)} for city, variables in expected.unavailable.items()],
+        "date": task.date,
+        "match": plain(task.match),
+        "temperature_unit": plain(task.temperature_unit),
+        "wind_unit": plain(task.wind_unit),
+        "rain_unit": plain(task.rain_unit),
+        "conditions": list(task.conditions),
     }
 
 
-# ----- The report file -----
+def task_problem(task: object) -> str | None:
+    """What is wrong with a plain task (as JSON), or None: its keys, a snapshot date, the choices,
+    and 1 to 6 well-formed, distinct conditions."""
+    if not isinstance(task, dict) or set(task) != set(TASK_KEYS):
+        return "task must hold date, match, temperature_unit, wind_unit, rain_unit and conditions"
+    problem = date_problem(task["date"])
+    if problem:
+        return problem
+    if task["match"] not in MATCHES:
+        return "match must be all or any"
+    if task["temperature_unit"] not in TEMPERATURE_UNITS:
+        return "temperature_unit must be C or F"
+    if task["wind_unit"] not in WIND_UNITS:
+        return "wind_unit must be kmh, mph or ms"
+    if task["rain_unit"] not in RAIN_UNITS:
+        return "rain_unit must be mm or in"
+    try:
+        parse_conditions(task["conditions"])
+    except ValueError as error:
+        return str(error)
+    return None
 
-REPORT_KEYS = ("date", "run", "examined", "alerts", "unavailable")
+
+def canonical_task(task: dict) -> dict:
+    """A plain task that passes task_problem with its conditions in canonical form: two tasks that
+    mean the same compare equal."""
+    return {**task, "conditions": [condition.text for condition in parse_conditions(task["conditions"])]}
 
 
 def canonical_conditions(texts: list[str]) -> list[str]:
@@ -328,54 +364,97 @@ def names_ok(names: object) -> bool:
     return isinstance(names, list) and all(isinstance(name, str) and name.strip() for name in names)
 
 
-def entries_problem(examined: object, alerts: object, unavailable: object) -> str | None:
-    """What is wrong with a judgement's three lists (one call's, or the whole file's), or None."""
-    if not names_ok(examined) or len(set(examined)) != len(examined):
+def judgement_problem(task: dict, examined: object, alerts: object, unavailable: object) -> str | None:
+    """What is wrong with a judgement's lists under ``task`` (a plain task that passes task_problem),
+    or None. ``examined`` is the cities the judgement covers (every reported city must be among
+    them), or None when the judgement's cities are not held to a list."""
+    if examined is not None and (not names_ok(examined) or len(set(examined)) != len(examined)):
         return "examined must be a list of distinct city names"
     if not isinstance(alerts, list) or not isinstance(unavailable, list):
         return "alerts and unavailable must be lists"
+    conditions = parse_conditions(task["conditions"])
+    given = [condition.text for condition in conditions]
+    needed = needed_variables(conditions)
     cities = []
     for alert in alerts:
         if not isinstance(alert, dict) or set(alert) != {"city", "values", "matched"}:
             return "each alert must hold city, values and matched"
         if not isinstance(alert["city"], str) or not alert["city"].strip():
             return "an alert's city must be a city name"
+        city = alert["city"]
         values = alert["values"]
         if not isinstance(values, dict) or not all(key in VARIABLES and is_number(value) for key, value in values.items()):
-            return f"{alert['city']}: values must map condition variables to numbers"
+            return f"{city}: values must map condition variables to numbers"
+        if set(values) != set(needed):
+            return f"{city}: values must hold exactly the variables the conditions use: {', '.join(needed)}"
         if not isinstance(alert["matched"], list) or not all(isinstance(text, str) for text in alert["matched"]):
-            return f"{alert['city']}: matched must be a list of conditions"
+            return f"{city}: matched must be a list of conditions"
         try:
-            canonical_conditions(alert["matched"])
+            matched = canonical_conditions(alert["matched"])
         except ValueError as error:
-            return f"{alert['city']}: matched: {error}"
-        cities.append(alert["city"])
+            return f"{city}: matched: {error}"
+        unknown = [text for text in matched if text not in given]
+        if unknown:
+            return f"{city}: matched names a condition the task does not have: {unknown[0]}"
+        if task["match"] == "all" and set(matched) != set(given):
+            return f"{city}: with match all, an alert city matches every condition"
+        if task["match"] == "any" and not matched:
+            return f"{city}: with match any, an alert city matches at least one condition"
+        cities.append(city)
     for entry in unavailable:
         if not isinstance(entry, dict) or set(entry) != {"city", "variables"}:
             return "each unavailable entry must hold city and variables"
         if not isinstance(entry["city"], str) or not entry["city"].strip():
             return "an unavailable entry's city must be a city name"
         variables = entry["variables"]
-        if not isinstance(variables, list) or not variables or not all(name in VARIABLES for name in variables):
-            return f"{entry['city']}: variables must name the condition variables the city lacks"
+        if not isinstance(variables, list) or not variables or not all(name in needed for name in variables):
+            return f"{entry['city']}: variables must name the condition variables the city lacks: {', '.join(needed)}"
         if len(set(variables)) != len(variables):
             return f"{entry['city']}: variables must be distinct"
         cities.append(entry["city"])
     if len(set(cities)) != len(cities):
         return "a city may appear once, as an alert or as unavailable"
-    outside = [city for city in cities if city not in set(examined)]
-    if outside:
-        return f"{', '.join(outside)} must be listed in examined to be reported"
+    if examined is not None:
+        outside = [city for city in cities if city not in set(examined)]
+        if outside:
+            return f"{', '.join(outside)} must be listed in examined to be reported"
     return None
 
 
 def report_problem(report: object) -> str | None:
     """What is wrong with a report file's shape (as parsed JSON), or None: the keys, a date, the run
-    marker of the process that wrote it, and well-formed lists."""
+    marker of the process that wrote it, the task, and well-formed lists under that task."""
     if not isinstance(report, dict) or set(report) != set(REPORT_KEYS):
-        return "the report must hold date, run, examined, alerts and unavailable"
+        return "the report must hold date, run, task, examined, alerts and unavailable"
     if not isinstance(report["date"], str):
         return "the report's date must be a string"
     if not isinstance(report["run"], str) or not report["run"].strip():
         return "the report's run must be the marker of the run that wrote it"
-    return entries_problem(report["examined"], report["alerts"], report["unavailable"])
+    problem = task_problem(report["task"])
+    if problem:
+        return f"task: {problem}"
+    if report["date"] != report["task"]["date"]:
+        return "the report's date is not its task's"
+    return judgement_problem(report["task"], report["examined"], report["alerts"], report["unavailable"])
+
+
+def plain_entries(expected: Expected) -> dict:
+    """``expected``'s alerts and unavailable cities as JSON."""
+    return {
+        "alerts": [
+            {"city": alert.city, "values": {k: float(v) for k, v in alert.values.items()}, "matched": list(alert.matched)}
+            for alert in expected.alerts
+        ],
+        "unavailable": [{"city": city, "variables": list(variables)} for city, variables in expected.unavailable.items()],
+    }
+
+
+def plain_report(task: dict, expected: Expected) -> dict:
+    """``expected`` as the report file's JSON (without the run marker report_alerts adds): what a
+    perfect run's file says."""
+    return {"date": task["date"], "task": dict(task), "examined": list(expected.examined), **plain_entries(expected)}
+
+
+def expected_output(task: dict, expected: Expected) -> dict:
+    """``expected`` as the task's output (an AlertReportOutput as JSON): what a perfect run submits."""
+    return {"task": dict(task), **plain_entries(expected)}

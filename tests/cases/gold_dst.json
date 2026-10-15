@@ -1,5 +1,5 @@
 {
-  "note": "The exact report for Santiago's 23-hour day (clocks went forward at midnight), in three report_alerts calls.",
+  "note": "The exact report for Santiago's 23-hour day (clocks went forward at midnight), in three report_alerts calls, then submit.",
   "task": "daily-alert",
   "arguments": {
     "date": "2026-09-06",
@@ -54,7 +54,17 @@
     {
       "tool": "report_alerts",
       "arguments": {
-        "date": "2026-09-06",
+        "task": {
+          "date": "2026-09-06",
+          "match": "any",
+          "temperature_unit": "F",
+          "wind_unit": "ms",
+          "rain_unit": "mm",
+          "conditions": [
+            "min_temp < 50",
+            "humidity >= 85"
+          ]
+        },
         "examined": [
           "Athens",
           "Auckland",
@@ -95,7 +105,17 @@
     {
       "tool": "report_alerts",
       "arguments": {
-        "date": "2026-09-06",
+        "task": {
+          "date": "2026-09-06",
+          "match": "any",
+          "temperature_unit": "F",
+          "wind_unit": "ms",
+          "rain_unit": "mm",
+          "conditions": [
+            "min_temp < 50",
+            "humidity >= 85"
+          ]
+        },
         "examined": [
           "Jakarta",
           "Lagos",
@@ -136,7 +156,17 @@
     {
       "tool": "report_alerts",
       "arguments": {
-        "date": "2026-09-06",
+        "task": {
+          "date": "2026-09-06",
+          "match": "any",
+          "temperature_unit": "F",
+          "wind_unit": "ms",
+          "rain_unit": "mm",
+          "conditions": [
+            "min_temp < 50",
+            "humidity >= 85"
+          ]
+        },
         "examined": [
           "Perth",
           "Phoenix",
@@ -182,7 +212,12 @@
           }
         ],
         "unavailable": []
-      }
+      },
+      "save_as": "last"
+    },
+    {
+      "tool": "submit",
+      "arguments": "$ref:last.report"
     }
   ],
   "answer": "7 alert(s): Buenos Aires (min_temp 36.0, humidity 63.0; min_temp < 50); Houston (min_temp 74.7, humidity 88.5; humidity >= 85); Mumbai (min_temp 76.5, humidity 85.3; humidity >= 85); Oslo (min_temp 49.1, humidity 74.0; min_temp < 50); Reykjavik (min_temp 40.1, humidity 79.1; min_temp < 50); Santiago (min_temp 46.9, humidity 43.6; min_temp < 50); Tokyo (min_temp 67.6, humidity 93.5; humidity >= 85).",

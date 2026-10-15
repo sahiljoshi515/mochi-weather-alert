@@ -1,10 +1,18 @@
-"""pin_alerts (the daily-alert reference) and the daily-alert task's outcome check."""
-
-import json
+"""pin_alerts (the daily-alert reference) and the daily-alert task's verdict on the submitted report."""
 
 from .checks import date_check, day_problem, names_problem, result
-from .report import NO_MARKER, compare, report_file, report_path, run_of
-from .rules import Units, evaluate, metrics_from_plain, parse_conditions, plain_report, report_problem
+from .report import compare, entries_by_city, entries_of, saved_report
+from .rules import (
+    Units,
+    canonical_task,
+    evaluate,
+    expected_output,
+    judgement_problem,
+    metrics_from_plain,
+    parse_conditions,
+    plain_entries,
+    plain_task,
+)
 
 
 def conditions_check(value):
@@ -59,13 +67,9 @@ def verify_output(input_value, output_value, workspace):
             return result(False, problem)
         if not 0 <= row.humidity_hours <= row.hours or (row.humidity_sum_pct is None) != (row.humidity_hours == 0):
             return result(False, f"{row.city}: the humidity sum and its hour count disagree")
-    pinned = plain_report(output_value.date, expected_of(input_value, output_value))
-    own = {
-        "date": output_value.date,
-        "examined": [row.city for row in output_value.metric],
-        "alerts": [{"city": a.city, "values": dict(a.values), "matched": list(a.matched)} for a in output_value.alerts],
-        "unavailable": [{"city": u.city, "variables": list(u.variables)} for u in output_value.unavailable],
-    }
+    expected = expected_of(input_value, output_value)
+    own = {"examined": [row.city for row in output_value.metric], **entries_of(output_value)}
+    pinned = {"examined": list(expected.examined), **plain_entries(expected)}
     if own != pinned:
         return result(False, "the pin's alerts disagree with its own metric aggregates")
     return result(
@@ -77,9 +81,10 @@ def verify_output(input_value, output_value, workspace):
     )
 
 
-def verify_task(arguments, reference, workspace):
-    """Approve the report only when it holds exactly the alerts the pinned aggregates give, each with
-    exactly the expected values and matched conditions, and exactly the unavailable cities."""
+def verify_task(arguments, output, reference, workspace):
+    """Approve the submitted report only when it is the report this run saved with every city
+    examined, and holds exactly the alerts the pinned aggregates give, each with exactly the expected
+    values and matched conditions, and exactly the unavailable cities."""
     if reference is None:
         return result(False, "no pinned reference", score=0.0)
     problem = date_check(arguments.date) or conditions_check(arguments)
@@ -87,9 +92,10 @@ def verify_task(arguments, reference, workspace):
         return result(False, problem["message"], score=0.0)
     if reference.date != arguments.date:
         return result(False, "the pinned day is another date", score=0.0)
+    task = plain_task(arguments)
     expected = expected_of(arguments, reference)
     report = {
-        "expected": plain_report(arguments.date, expected),
+        "expected": expected_output(task, expected),
         "conditions": [condition.text for condition in parse_conditions(arguments.conditions)],
         "match": arguments.match.value,
         "units": {
@@ -99,25 +105,19 @@ def verify_task(arguments, reference, workspace):
         },
         "cities": len(reference.metric),
     }
-    run = run_of(workspace)
-    if run is None:
-        return result(False, NO_MARKER, score=0.0, **report)
-    path = report_file(workspace, arguments.date)
-    if not path.is_file():
-        return result(False, f"no report at {report_path(arguments.date)}", score=0.0, **report)
-    try:
-        submitted = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        return result(False, f"{report_path(arguments.date)} is not a report of this run: not JSON", score=0.0, **report)
-    problem = report_problem(submitted)
+    if canonical_task(plain_task(output.task)) != canonical_task(task):
+        return result(False, "the submitted report is for another task input: submit the report the last report_alerts call returned", score=0.0, **report)
+    submitted = entries_of(output)
+    problem = judgement_problem(task, None, submitted["alerts"], submitted["unavailable"])
     if problem:
-        return result(False, f"{report_path(arguments.date)} is not a report of this run: {problem}", score=0.0, **report)
-    if submitted["run"] != run:
-        return result(False, f"{report_path(arguments.date)} is not a report of this run: it was left by an earlier one", score=0.0, **report)
-    if submitted["date"] != arguments.date:
-        return result(False, "the report is for another day", score=0.0, **report)
+        return result(False, f"the submitted report is malformed: {problem}", score=0.0, **report)
+    saved, problem = saved_report(workspace, arguments.date)
+    if problem:
+        return result(False, problem, score=0.0, **report)
+    if canonical_task(saved["task"]) != canonical_task(task):
+        return result(False, "the saved report is for another task input", score=0.0, **report)
     cities = set(expected.examined)
-    examined = set(submitted["examined"])
+    examined = set(saved["examined"])
     coverage = {
         "examined": len(examined & cities),
         "unexamined": sorted(cities - examined),
@@ -125,6 +125,9 @@ def verify_task(arguments, reference, workspace):
     }
     score, problems, differences = compare(expected, submitted)
     counts = f"{len(expected.alerts)} alert(s) and {len(expected.unavailable)} unavailable city(ies)"
+    if entries_by_city(saved) != entries_by_city(submitted):
+        message = "the submitted report differs from the saved report: submit the report the last report_alerts call returned, as it is"
+        return result(False, message, score=0.0, **differences, **coverage, **report)
     if coverage["unexamined"] or coverage["unknown_examined"]:
         # Every city must be judged: the entries' F1 is scaled by the share of the pinned cities among
         # the pinned and the examined ones, so an unexamined city and a name not in the snapshot both cost.

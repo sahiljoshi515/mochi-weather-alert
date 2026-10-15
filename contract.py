@@ -41,7 +41,7 @@ class RainUnit(Enum):
 
 
 DATE = "A local calendar day in the snapshot, YYYY-MM-DD, from 2026-07-01 to 2026-09-30"
-CITY = "A city's name as list_cities gives it, e.g. Santiago"
+CITY = "A city's name as the task names it, e.g. Santiago"
 CONDITION = (
     'A rule "<variable> <op> <number>": variable max_temp, min_temp, rain, wind or humidity; op >=, >, <= or <; '
     'the number in the requested units (humidity in %), with at most 2 decimals; e.g. "max_temp >= 95"'
@@ -51,16 +51,17 @@ MISSING = (
     "Source variables with at least one missing hour that day: temperature_2m, relative_humidity_2m, "
     "precipitation or wind_speed_10m"
 )
+TASK = "The task input, exactly as given"
 
 
 @dataclass
 class AlertInput(Output):
     date: Annotated[str, DATE]
-    match: Annotated[Match, "all: every condition must hold for a city; any: at least one must"]
-    temperature_unit: Annotated[TempUnit, "C or F: the unit of max_temp and min_temp thresholds and reported values"]
-    wind_unit: Annotated[WindUnit, "kmh, mph or ms: the unit of wind thresholds and reported values"]
-    rain_unit: Annotated[RainUnit, "mm or in: the unit of rain thresholds and reported values"]
-    conditions: Annotated[list[Annotated[str, CONDITION]], "1 to 6 distinct conditions"]
+    match: Annotated[Match, "all: a city is an alert only when every condition holds for it; any: when at least one does"]
+    temperature_unit: Annotated[TempUnit, "C or F: the unit of max_temp and min_temp thresholds and of the reported temperatures"]
+    wind_unit: Annotated[WindUnit, "kmh, mph or ms: the unit of wind thresholds and of the reported wind speeds"]
+    rain_unit: Annotated[RainUnit, "mm or in: the unit of rain thresholds and of the reported precipitation"]
+    conditions: Annotated[list[Annotated[str, CONDITION]], "1 to 6 distinct conditions, e.g. [\"max_temp >= 95\", \"rain > 0.5\"]"]
 
 
 @dataclass
@@ -102,6 +103,13 @@ class PinOutput(Output):
 
 
 @dataclass
+class AlertReportOutput(Output):
+    task: Annotated[AlertInput, TASK]
+    alerts: Annotated[list[Alert], "Every city whose day satisfies the rules, with its values and matched conditions; [] for none"]
+    unavailable: Annotated[list[Unavailable], "Every city with a missing hour for a variable the conditions use; [] for none"]
+
+
+@dataclass
 class CitiesInput(Output):
     date: Annotated[str, DATE]
 
@@ -122,7 +130,7 @@ class CitiesOutput(Output):
 
 @dataclass
 class DailyInput(Output):
-    cities: Annotated[list[Annotated[str, CITY]], "1 to 30 distinct cities: every city list_cities gives, in one call"]
+    cities: Annotated[list[Annotated[str, CITY]], "1 to 30 distinct cities: every city the task names, in one call"]
     date: Annotated[str, DATE]
 
 
@@ -172,7 +180,7 @@ class HourlyOutput(Output):
 
 @dataclass
 class ReportInput(Output):
-    date: Annotated[str, DATE]
+    task: Annotated[AlertInput, TASK]
     examined: Annotated[
         list[Annotated[str, CITY]],
         "The cities this call judges, 1 to 30 distinct: their earlier entries are replaced by this call's, and a "
@@ -186,10 +194,10 @@ class ReportInput(Output):
 
 @dataclass
 class ReportOutput(Output):
-    path: Annotated[str, "The report file, relative to the workspace: weather-alert/<date>.json"]
-    alerts: Annotated[int, "This call's alert entries"]
-    unavailable: Annotated[int, "This call's unavailable entries"]
-    examined: Annotated[int, "This call's examined cities"]
+    path: Annotated[str, "The report file, relative to the workspace: reports/<date>.json"]
+    examined: Annotated[int, "How many of the 30 cities the merged report has examined so far"]
+    complete: Annotated[bool, "Whether every city is examined: then submit the report"]
+    report: Annotated[AlertReportOutput, "The merged report so far: the task, every alert and every unavailable city"]
 
 
 TOOLS = {
@@ -199,4 +207,4 @@ TOOLS = {
     Tool.GET_HOURLY: (HourlyInput, HourlyOutput),
     Tool.REPORT_ALERTS: (ReportInput, ReportOutput),
 }
-TASKS = {Task.DAILY_ALERT: AlertInput}
+TASKS = {Task.DAILY_ALERT: (AlertInput, AlertReportOutput)}
