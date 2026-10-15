@@ -18,6 +18,19 @@
     {
       "tool": "get_daily",
       "arguments": {
+        "task": {
+          "date": "2026-07-07",
+          "match": "any",
+          "temperature_unit": "F",
+          "wind_unit": "mph",
+          "rain_unit": "in",
+          "conditions": [
+            "max_temp >= 101.3",
+            "humidity >= 80",
+            "rain > 0.5",
+            "wind >= 20"
+          ]
+        },
         "cities": [
           "Athens",
           "Auckland",
@@ -49,8 +62,7 @@
           "Tokyo",
           "Toronto",
           "Vancouver"
-        ],
-        "date": "2026-07-07"
+        ]
       }
     },
     {
@@ -79,7 +91,12 @@
           "Denver",
           "Dubai",
           "Honolulu",
-          "Houston"
+          "Houston",
+          "Jakarta",
+          "Lagos",
+          "Lima",
+          "London",
+          "Madrid"
         ],
         "alerts": [
           {
@@ -119,51 +136,6 @@
             ]
           },
           {
-            "city": "Athens",
-            "values": {
-              "max_temp": 91.9,
-              "humidity": 34.3,
-              "rain": 0.0,
-              "wind": 8.2
-            },
-            "matched": [
-              "humidity >= 80"
-            ]
-          }
-        ],
-        "unavailable": []
-      }
-    },
-    {
-      "tool": "report_alerts",
-      "arguments": {
-        "task": {
-          "date": "2026-07-07",
-          "match": "any",
-          "temperature_unit": "F",
-          "wind_unit": "mph",
-          "rain_unit": "in",
-          "conditions": [
-            "max_temp >= 101.3",
-            "humidity >= 80",
-            "rain > 0.5",
-            "wind >= 20"
-          ]
-        },
-        "examined": [
-          "Jakarta",
-          "Lagos",
-          "Lima",
-          "London",
-          "Madrid",
-          "Mexico City",
-          "Moscow",
-          "Mumbai",
-          "Nairobi",
-          "Oslo"
-        ],
-        "alerts": [
-          {
             "city": "Lagos",
             "values": {
               "max_temp": 83.3,
@@ -200,16 +172,15 @@
             ]
           },
           {
-            "city": "Mumbai",
+            "city": "Athens",
             "values": {
-              "max_temp": 82.6,
-              "rain": 2.2,
-              "wind": 16.5,
-              "humidity": 87.6
+              "max_temp": 91.9,
+              "humidity": 34.3,
+              "rain": 0.0,
+              "wind": 8.2
             },
             "matched": [
-              "humidity >= 80",
-              "rain > 0.5"
+              "humidity >= 80"
             ]
           }
         ],
@@ -233,6 +204,11 @@
           ]
         },
         "examined": [
+          "Mexico City",
+          "Moscow",
+          "Mumbai",
+          "Nairobi",
+          "Oslo",
           "Perth",
           "Phoenix",
           "Reykjavik",
@@ -247,6 +223,19 @@
           "Athens"
         ],
         "alerts": [
+          {
+            "city": "Mumbai",
+            "values": {
+              "max_temp": 82.6,
+              "rain": 2.2,
+              "wind": 16.5,
+              "humidity": 87.6
+            },
+            "matched": [
+              "humidity >= 80",
+              "rain > 0.5"
+            ]
+          },
           {
             "city": "Perth",
             "values": {

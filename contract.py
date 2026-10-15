@@ -130,8 +130,8 @@ class CitiesOutput(Output):
 
 @dataclass
 class DailyInput(Output):
+    task: Annotated[AlertInput, TASK]
     cities: Annotated[list[Annotated[str, CITY]], "1 to 30 distinct cities: every city the task names, in one call"]
-    date: Annotated[str, DATE]
 
 
 @dataclass
@@ -143,10 +143,15 @@ class DailyCity(Output):
     min_temp_c: Annotated[float | None, "The day's lowest hourly temperature, °C; null when no hour has one"]
     rain_mm: Annotated[float | None, "The precipitation total over the hours that have one, mm; null when none has"]
     max_wind_kmh: Annotated[float | None, "The day's highest hourly wind speed, km/h; null when no hour has one"]
-    mean_humidity_pct: Annotated[
-        float | None, "The mean of the hourly relative humidities present, %, to 4 decimals; null when none is"
-    ]
+    humidity_sum_pct: Annotated[float | None, "The sum of the hourly relative humidities present, %; null when none is"]
+    humidity_hours: Annotated[int, "How many hours have a relative humidity"]
     missing: Annotated[list[str], MISSING]
+    values: Annotated[
+        dict[str, float],
+        "Each variable the task's conditions use that the day has every hour of, in the task's units, exact to 9 "
+        "decimals (truncated, never rounded): compare the conditions against these as they are, and report each "
+        'one rounded half up to 1 decimal, e.g. {"max_temp": 96.26, "wind": 24.979121927}',
+    ]
 
 
 @dataclass

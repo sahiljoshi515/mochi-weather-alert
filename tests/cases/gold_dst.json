@@ -1,5 +1,5 @@
 {
-  "note": "The exact report for Santiago's 23-hour day (clocks went forward at midnight) on the prescribed path for two needed variables: two report_alerts calls of 15 cities, then submit.",
+  "note": "The exact report for Santiago's 23-hour day (clocks went forward at midnight) on the prescribed path: two report_alerts calls of 15 cities, then submit.",
   "task": "daily-alert",
   "arguments": {
     "date": "2026-09-06",
@@ -16,6 +16,17 @@
     {
       "tool": "get_daily",
       "arguments": {
+        "task": {
+          "date": "2026-09-06",
+          "match": "any",
+          "temperature_unit": "F",
+          "wind_unit": "ms",
+          "rain_unit": "mm",
+          "conditions": [
+            "min_temp < 50",
+            "humidity >= 85"
+          ]
+        },
         "cities": [
           "Athens",
           "Auckland",
@@ -47,8 +58,7 @@
           "Tokyo",
           "Toronto",
           "Vancouver"
-        ],
-        "date": "2026-09-06"
+        ]
       }
     },
     {

@@ -7,8 +7,7 @@ import os
 import secrets
 import threading
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal
-from fractions import Fraction
+from decimal import Decimal
 from pathlib import Path
 
 from slimconfig import plain_output
@@ -42,6 +41,7 @@ from plugin.rules import (
     canonical_task,
     date_problem,
     evaluate,
+    given_values,
     judgement_problem,
     parse_conditions,
     plain_task,
@@ -59,7 +59,6 @@ CALL_LOG_LINES = 300
 # it, and a report left by an earlier run (another token, or an older shape) is replaced, never merged.
 RUN = secrets.token_hex(8)
 LOCK = threading.Lock()
-MEAN_PLACES = Decimal("0.0001")
 
 
 def checked_date(date: str) -> str:
@@ -131,8 +130,14 @@ def list_cities(given: CitiesInput, workspace: Path) -> CitiesOutput:
 
 
 def get_daily(given: DailyInput, workspace: Path) -> DailyOutput:
-    """Up to 10 cities' local-day aggregates in metric units."""
-    date = checked_date(given.date)
+    """Up to 30 cities' local-day aggregates in metric units, and each needed variable in the task's units."""
+    task = plain_task(given.task)
+    problem = task_problem(task)
+    if problem:
+        raise ValueError(problem)
+    date = task["date"]
+    conditions = parse_conditions(task["conditions"])
+    units = Units(task["temperature_unit"], task["wind_unit"], task["rain_unit"])
     names = given.cities
     if not 1 <= len(names) <= MAX_CITIES_PER_CALL or len(set(names)) != len(names):
         raise ValueError(f"cities must be 1 to {MAX_CITIES_PER_CALL} distinct names")
@@ -144,10 +149,6 @@ def get_daily(given: DailyInput, workspace: Path) -> DailyOutput:
     rows = []
     for name in names:
         day = day_metrics(name, date)
-        mean = None
-        if day.humidity_sum_pct is not None and day.humidity_hours:
-            exact = Fraction(day.humidity_sum_pct) / day.humidity_hours
-            mean = (Decimal(exact.numerator) / Decimal(exact.denominator)).quantize(MEAN_PLACES, ROUND_HALF_UP)
         rows.append(
             DailyCity(
                 city=name,
@@ -157,8 +158,10 @@ def get_daily(given: DailyInput, workspace: Path) -> DailyOutput:
                 min_temp_c=number(day.min_temp_c),
                 rain_mm=number(day.rain_mm),
                 max_wind_kmh=number(day.max_wind_kmh),
-                mean_humidity_pct=number(mean),
+                humidity_sum_pct=number(day.humidity_sum_pct),
+                humidity_hours=day.humidity_hours,
                 missing=list(day.missing),
+                values={variable: float(value) for variable, value in given_values(day, conditions, units).items()},
             )
         )
     return DailyOutput(date=date, cities=rows)
@@ -204,7 +207,7 @@ def write_run_marker(workspace: Path) -> str:
 def call_summary(name: str, arguments: dict) -> dict:
     """What a call asked for, in a few numbers: never its whole arguments."""
     if name == "get_daily":
-        return {"date": arguments.get("date"), "cities": len(arguments.get("cities") or [])}
+        return {"date": (arguments.get("task") or {}).get("date"), "cities": len(arguments.get("cities") or [])}
     if name == "report_alerts":
         task = arguments.get("task") or {}
         return {

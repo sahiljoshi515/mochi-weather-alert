@@ -8,15 +8,16 @@ from fractions import Fraction
 import pytest
 
 from plugin.rules import (
+    CHUNK,
     DayMetrics,
     Units,
     aggregate,
     canonical_task,
-    chunk_size,
     convert,
     date_problem,
     evaluate,
     expected_output,
+    given_values,
     holds,
     judgement_problem,
     metrics_from_plain,
@@ -27,6 +28,7 @@ from plugin.rules import (
     report_problem,
     round_half_up,
     task_problem,
+    truncate,
 )
 
 METRIC = Units("C", "kmh", "mm")
@@ -303,11 +305,40 @@ def test_checks_a_task(task, problem) -> None:
         assert problem in found
 
 
-def test_the_prescribed_chunk_size_follows_the_needed_variables() -> None:
-    assert chunk_size(parse_conditions(["max_temp >= 95"])) == 15
-    assert chunk_size(parse_conditions(["max_temp >= 95", "min_temp < 50", "humidity >= 85"])) == 15
-    assert chunk_size(parse_conditions(["max_temp >= 95", "min_temp < 50", "humidity >= 85", "rain > 0.5"])) == 10
-    assert chunk_size(parse_conditions(["max_temp >= 95", "max_temp >= 100", "humidity >= 85", "rain > 0.5"])) == 15  # three variables
+@pytest.mark.parametrize(
+    ("value", "cut"),
+    [
+        (Fraction(24979057929, 10**9), "24.979057929"),
+        (Fraction(Decimal("40.2")) / Fraction("1.609344"), "24.979121927"),
+        (Fraction("2.5"), "2.500000000"),
+        (Fraction(1, 3), "0.333333333"),
+        (Fraction(2, 3), "0.666666666"),
+        (Fraction(-2, 3), "-0.666666666"),
+        (Fraction(-5, 100), "-0.050000000"),
+        (Fraction(0), "0.000000000"),
+        (Fraction(95), "95.000000000"),
+    ],
+)
+def test_truncates_toward_zero_keeping_the_exact_digits(value: Fraction, cut: str) -> None:
+    found = truncate(value)
+    assert format(found, "f") == cut and found == Decimal(cut)  # a zero's str is 0E-9; its digits are all there
+    assert abs(Fraction(found)) <= abs(value) and abs(value) - abs(Fraction(found)) < Fraction(1, 10**9)
+    assert str(truncate(Fraction(1, 3), 2)) == "0.33"
+
+
+def test_rounding_the_truncated_value_half_up_is_rounding_the_exact_value() -> None:
+    for value in (Fraction(2495, 100), Fraction(7125, 100), Fraction(24979, 1000), Fraction(1, 3), Fraction(44999999, 10**8), Fraction(45, 100)):
+        assert round_half_up(Fraction(truncate(value))) == round_half_up(value)
+
+
+def test_given_values_are_the_needed_available_variables_in_the_units() -> None:
+    day = metrics("Boundary", max_temp="35.0", min_temp="20.0", rain="11.43", wind="40.2", humidity_sum="1710")
+    conditions = parse_conditions(["max_temp >= 95", "wind >= 25", "rain > 0.5"])
+    assert given_values(day, conditions, IMPERIAL) == {"max_temp": Decimal("95.000000000"), "rain": Decimal("0.450000000"), "wind": Decimal("24.979121927")}
+    assert given_values(day, parse_conditions(["humidity > 70"]), METRIC) == {"humidity": Decimal("71.250000000")}
+    gap = metrics("Gap", max_temp="40.0", missing=["temperature_2m"])
+    assert given_values(gap, conditions, IMPERIAL) == {"rain": Decimal("0.000000000"), "wind": Decimal("6.213711922")}
+    assert CHUNK == 15
 
 
 def test_canonical_tasks_compare_equal_when_they_mean_the_same() -> None:

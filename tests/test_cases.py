@@ -69,12 +69,10 @@ def test_each_case_expects_the_verifiers_verdict(case_file: Path, tmp_path: Path
     assert all(len(step["arguments"]["cities"]) <= 30 for step in tool_steps if step["tool"] == "get_daily")
     assert sum(1 for step in case["steps"] if "tool" in step) <= 5, "every case leaves the host's sixth step for the final answer"
     assert [step["tool"] for step in case["steps"] if "tool" in step][-1] == "submit", "every case ends by submitting"
-    if case_file.stem == "gold_chunked":  # four needed variables: three calls of ten cities
-        assert [step["tool"] for step in tool_steps] == ["get_daily", "report_alerts", "report_alerts", "report_alerts", "submit"]
-        assert all(len(step["arguments"]["examined"]) == 10 for step in tool_steps if step["tool"] == "report_alerts")
-    if case_file.stem == "gold_dst":  # two needed variables: two calls of fifteen
+    if case_file.stem in ("gold_chunked", "gold_dst"):  # the prescribed path: two calls of fifteen cities
         assert [step["tool"] for step in tool_steps] == ["get_daily", "report_alerts", "report_alerts", "submit"]
         assert all(len(step["arguments"]["examined"]) == 15 for step in tool_steps if step["tool"] == "report_alerts")
+    assert all(step["arguments"]["task"] == case["arguments"] for step in tool_steps if step["tool"] in ("get_daily", "report_alerts"))
     submitted = replay(case, tmp_path)
     found = verifier.verify_task("daily-alert", arguments, build_output(submitted, AlertReportOutput), build_output(plain_output(pinned), PinOutput), str(tmp_path))
     expect = case["expect"]

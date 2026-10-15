@@ -16,6 +16,17 @@
     {
       "tool": "get_daily",
       "arguments": {
+        "task": {
+          "date": "2026-09-06",
+          "match": "any",
+          "temperature_unit": "F",
+          "wind_unit": "ms",
+          "rain_unit": "mm",
+          "conditions": [
+            "min_temp < 50",
+            "humidity >= 85"
+          ]
+        },
         "cities": [
           "Athens",
           "Auckland",
@@ -47,8 +58,7 @@
           "Tokyo",
           "Toronto",
           "Vancouver"
-        ],
-        "date": "2026-09-06"
+        ]
       }
     },
     {

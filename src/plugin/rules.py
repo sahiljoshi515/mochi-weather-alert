@@ -37,9 +37,11 @@ CITY_COUNT = 30  # the snapshot's cities
 MAX_CITIES_PER_CALL = CITY_COUNT
 MAX_REPORT_ENTRIES = CITY_COUNT  # a report names each city at most once
 # Cities per report_alerts call on the prescribed path: a hosted model's reply (its reasoning included)
-# must stay under 2,048 tokens, so the more variables the conditions use, the fewer cities per step.
-CHUNK_FEW = 15  # with 1 to 3 needed variables: two calls
-CHUNK_MANY = 10  # with 4 or 5: three calls
+# must stay under 2,048 tokens, so the task is judged in two halves.
+CHUNK = 15
+# How many decimals get_daily gives a value in the task's units: truncated, never rounded, so comparing
+# it with a threshold of at most 2 decimals and rounding it half up to 1 decimal give the exact answers.
+GIVEN_PLACES = 9
 PLACES = 1  # reported values carry one decimal
 DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 CONDITION = re.compile(r"^\s*(max_temp|min_temp|rain|wind|humidity)\s*(>=|<=|>|<)\s*([+-]?(?:\d+(?:\.\d{1,2})?|\.\d{1,2}))\s*$")
@@ -155,9 +157,23 @@ def needed_variables(conditions: list[Condition]) -> tuple[str, ...]:
     return tuple(variable for variable in VARIABLES if variable in used)
 
 
-def chunk_size(conditions: list[Condition]) -> int:
-    """How many cities one report_alerts call judges on the prescribed path."""
-    return CHUNK_MANY if len(needed_variables(conditions)) >= 4 else CHUNK_FEW
+def truncate(value: Fraction, places: int = GIVEN_PLACES) -> Decimal:
+    """``value`` cut to ``places`` decimals toward zero, exactly: every digit kept is the exact value's,
+    and every one of the ``places`` decimals is written, 0.45 as 0.450000000."""
+    scaled = abs(value) * 10**places
+    whole = scaled.numerator // scaled.denominator
+    sign = "-" if value < 0 and whole else ""
+    return Decimal(f"{sign}{whole // 10**places}.{whole % 10**places:0{places}d}")
+
+
+def given_values(metrics: DayMetrics, conditions: list[Condition], units: Units) -> dict[str, Decimal]:
+    """What get_daily gives a city for the conditions: each needed variable the day has every hour of,
+    in the requested units, truncated to GIVEN_PLACES decimals."""
+    return {
+        variable: truncate(convert(variable, exact_metric(metrics, variable), units))
+        for variable in needed_variables(conditions)
+        if available(metrics, variable)
+    }
 
 
 # ----- Arithmetic -----

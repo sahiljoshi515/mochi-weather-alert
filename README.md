@@ -14,7 +14,7 @@ matched rule.
 |---|---|---|
 | `pin_alerts` | Every city's local day in metric units (the exact ingredients of each value) plus the alerts and unavailable cities the rules give; the task's pinned reference | `src/plugin/alerts.py` |
 | `list_cities` | The 30 cities, each with its country, time zone and how many hours its local calendar day has on the date (23, 24 or 25) | `src/plugin/alerts.py` |
-| `get_daily` | Up to 30 cities' local-day aggregates on a date, so one call covers every city: highest and lowest temperature (°C), precipitation total (mm), highest wind (km/h), mean humidity (%), hour count and the variables with a missing hour | `src/plugin/alerts.py` |
+| `get_daily` | Up to 30 cities' local-day aggregates for a task, so one call covers every city: highest and lowest temperature (°C), precipitation total (mm), highest wind (km/h), the humidity sum and its hours, hour count, the variables with a missing hour, and `values`, each variable the task's conditions use in the task's units, exact to 9 decimals (truncated, never rounded) | `src/plugin/alerts.py` |
 | `get_hourly` | One city's hourly rows over its local calendar day, in metric units, for inspecting one day | `src/plugin/alerts.py` |
 | `report_alerts` | Merges one call's judgement of up to 30 `examined` cities, under the task input it repeats, into `reports/<date>.json`: the cities a call examines are restated by it (an examined city with no entry has no alert), every other city's entries are kept. Atomic per call; returns the merged report so far, how many cities it examines and whether that is every city; the first call of a run replaces any file an earlier run left | `src/plugin/alerts.py` |
 
@@ -24,8 +24,12 @@ matched rule.
 |---|---|---|
 | `daily-alert` | Finds every city whose local day on a date crossed the given thresholds and submits each one's values in the requested units | `agent`, with `get_daily` and `report_alerts`; reference `pin_alerts` |
 
-The tools return metric data only. Converting to the requested units, rounding
-and applying the rules is the agent's work. People use the plugin by chatting:
+The tools return the data; comparing each value with its threshold exactly,
+rounding half up, applying `all` or `any`, keeping cities with a missing hour
+out, and reporting every city is the agent's work. (Unit conversion is the
+tool's: a hosted model's reply, reasoning included, is capped at about 2,000
+tokens, and converting 30 cities by hand did not fit.) People use the plugin by
+chatting:
 the chat agent turns a request such as "which cities had a high of at least
 95 °F or more than half an inch of rain on 7 July 2026?" into the task's input
 (the date, `all` or `any`, the units and one to six conditions like
@@ -38,23 +42,24 @@ scratch workspace the agent never sees and pins its output: every city's day
 in metric units and the alerts the shared rules give. The agent then has
 `get_daily`, `report_alerts` and `submit`, and six steps:
 
-1. `get_daily` once with all 30 cities (about 1,600 tokens of aggregates).
-2. `report_alerts` over the cities in the order the instructions list them,
-   a fixed number per call: ten per call (three calls) when the conditions
-   use four or five variables, fifteen (two calls) when they use fewer. Each
-   call repeats the task input, names the cities it `examined`, and gives
-   every alert city its `values` (one per variable the conditions use, in
-   the requested units, rounded half up to one decimal) and `matched`
-   conditions, and every `unavailable` city the variables it has a missing
-   hour for. The call merges that judgement into `reports/<date>.json` and
-   answers with the merged report so far, how many cities are examined and
-   whether that is every city.
+1. `get_daily` once, with the task input and all 30 cities (about 2,800
+   tokens): each city's metric aggregates and its `values`, the needed
+   variables in the task's units, exact to 9 decimals.
+2. `report_alerts` twice, fifteen cities each, in the order the instructions
+   list them. Each call repeats the task input, names the cities it
+   `examined`, and gives every alert city its `values` (one per variable the
+   conditions use, rounded half up to one decimal) and `matched` conditions,
+   and every `unavailable` city the variables it has a missing hour for. The
+   call merges that judgement into `reports/<date>.json` and answers with
+   the merged report so far, how many cities are examined and whether that
+   is every city.
 3. `submit` with the report the last call returned, as it is.
 4. The final answer.
 
-The chunk size keeps each reply, reasoning included, inside the hosted
-model's 2,048-token output cap, and the four or five tool calls fit the
-hosted agent's six steps, which the site's 180-second run limit also bounds.
+Fifteen cities per step keeps each reply, reasoning included, inside the
+hosted model's 2,048-token output cap, and the four tool calls leave a step
+to spare in the hosted agent's six, which the site's 180-second run limit
+also bounds.
 
 ### The verdict
 
@@ -74,9 +79,11 @@ all cost.
 Every tool call is checked too: `verify_input` refuses a date outside the
 snapshot, a malformed condition, an alert whose values are not exactly the
 needed variables or whose matched conditions are not the task's; and
-`verify_output` checks the aggregates are well formed, the pin agrees with its
-own aggregates, and a report call's returned report holds that call's
-judgement of every city it examined.
+`verify_output` checks the aggregates are well formed, that `get_daily`'s
+values are exactly the needed variables in the task's units as its own metric
+aggregates give them (recomputed with the shared rules), that the pin agrees
+with its own aggregates, and that a report call's returned report holds that
+call's judgement of every city it examined.
 
 ### The data
 

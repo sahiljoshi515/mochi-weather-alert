@@ -16,7 +16,7 @@ from slimconfig import build_output, plain_output
 from contract import AlertInput, CitiesInput, DailyInput, HourlyInput, ReportInput
 from plugin.alerts import RUN, get_daily, get_hourly, list_cities, pin_alerts, report_alerts
 from plugin.data import snapshot
-from plugin.rules import aggregate
+from plugin.rules import Units, aggregate, given_values, metrics_from_plain, parse_conditions, truncate
 
 DATE = "2026-09-06"
 ARGUMENTS = {"date": DATE, "match": "any", "temperature_unit": "F", "wind_unit": "mph", "rain_unit": "in", "conditions": ["max_temp >= 95", "rain > 0.5"]}
@@ -67,22 +67,39 @@ def test_list_cities_gives_every_city_with_its_day_length(tmp_path: Path) -> Non
         list_cities(build_output({"date": "2026-06-30"}, CitiesInput), tmp_path)
 
 
-def test_get_daily_gives_metric_aggregates_for_the_requested_cities(tmp_path: Path) -> None:
-    found = get_daily(build_output({"cities": NAMES[:10], "date": DATE}, DailyInput), tmp_path)
+def daily(cities, task=ARGUMENTS):
+    return build_output({"task": task, "cities": list(cities)}, DailyInput)
+
+
+def test_get_daily_gives_metric_aggregates_and_the_needed_values_in_the_tasks_units(tmp_path: Path) -> None:
+    found = get_daily(daily(NAMES[:10]), tmp_path)
     assert [row.city for row in found.cities] == NAMES[:10]
     pinned = {row.city: row for row in pin_alerts(build_output(ARGUMENTS, AlertInput), tmp_path).metric}
+    conditions = parse_conditions(ARGUMENTS["conditions"])
+    units = Units("F", "mph", "in")
     for row in found.cities:
         pin = pinned[row.city]
         assert (row.max_temp_c, row.min_temp_c, row.rain_mm, row.max_wind_kmh, row.hours, row.missing) == (
             pin.max_temp_c, pin.min_temp_c, pin.rain_mm, pin.max_wind_kmh, pin.hours, pin.missing
         )
-        mean = Fraction(int(pin.humidity_sum_pct), pin.humidity_hours)
-        assert abs(Fraction(str(row.mean_humidity_pct)) - mean) <= Fraction(1, 20000)
-    assert len(json.dumps(plain_output(found))) < 2500
-    assert next(row for row in found.cities if row.city == "Athens").mean_humidity_pct == 31.4583  # 755/24
-    everything = get_daily(build_output({"cities": NAMES, "date": DATE}, DailyInput), tmp_path)
+        assert (row.humidity_sum_pct, row.humidity_hours) == (pin.humidity_sum_pct, pin.humidity_hours)
+        assert set(row.values) == {"max_temp", "rain"}
+        metrics = metrics_from_plain(row.city, row.hours, row.max_temp_c, row.min_temp_c, row.rain_mm, row.max_wind_kmh, row.humidity_sum_pct, row.humidity_hours, row.missing)
+        assert {k: Decimal(str(v)) for k, v in row.values.items()} == given_values(metrics, conditions, units)
+    athens = next(row for row in found.cities if row.city == "Athens")
+    assert athens.values["max_temp"] == float(Decimal(str(athens.max_temp_c)) * 9 / 5 + 32)  # exact at 2 decimals
+    assert athens.values["rain"] == float(truncate(Fraction(Decimal(str(athens.rain_mm))) / Fraction("25.4")))
+    assert len(json.dumps(plain_output(found))) < 3600
+    everything = get_daily(daily(NAMES), tmp_path)
     assert [row.city for row in everything.cities] == NAMES
-    assert len(json.dumps(plain_output(everything))) < 7000  # about 1,600 tokens for the whole day
+    assert len(json.dumps(plain_output(everything))) < 11000  # about 2,800 tokens for the whole day
+    # the task's units and conditions choose the values: wind in m/s, humidity as the exact mean
+    metric = {**ARGUMENTS, "temperature_unit": "C", "wind_unit": "ms", "rain_unit": "mm", "conditions": ["wind >= 5", "humidity > 50"]}
+    other = get_daily(daily(["Athens"], task=metric), tmp_path).cities[0]
+    assert set(other.values) == {"wind", "humidity"}
+    assert other.values["wind"] == float(truncate(Fraction(Decimal(str(other.max_wind_kmh))) / Fraction("3.6")))
+    assert other.values["humidity"] == float(truncate(Fraction(int(other.humidity_sum_pct), other.humidity_hours)))
+    assert other.values["humidity"] == 31.458333333  # 755/24, truncated
 
 
 @pytest.mark.parametrize(
@@ -97,7 +114,14 @@ def test_get_daily_gives_metric_aggregates_for_the_requested_cities(tmp_path: Pa
 )
 def test_get_daily_refuses_bad_city_lists(tmp_path: Path, cities: list[str], error: str) -> None:
     with pytest.raises(ValueError, match=error):
-        get_daily(build_output({"cities": cities, "date": DATE}, DailyInput), tmp_path)
+        get_daily(daily(cities), tmp_path)
+
+
+def test_get_daily_refuses_a_bad_task(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="outside the snapshot"):
+        get_daily(daily(["Athens"], task={**ARGUMENTS, "date": "2026-10-01"}), tmp_path)
+    with pytest.raises(ValueError, match="not a condition"):
+        get_daily(daily(["Athens"], task={**ARGUMENTS, "conditions": ["hot > 1"]}), tmp_path)
 
 
 def test_get_hourly_gives_the_local_day_with_its_offsets(tmp_path: Path) -> None:
@@ -120,11 +144,11 @@ def test_the_local_day_is_not_the_utc_day(tmp_path: Path) -> None:
             if datetime.fromisoformat(row.time).astimezone(UTC).strftime("%Y-%m-%d") == DATE:
                 rows.append({"temperature_2m": Decimal(str(row.temp_c)), "relative_humidity_2m": Decimal(str(row.humidity_pct)), "precipitation": Decimal(str(row.rain_mm)), "wind_speed_10m": Decimal(str(row.wind_kmh))})
     utc_day = aggregate("Santiago", rows)
-    local = get_daily(build_output({"cities": ["Santiago"], "date": DATE}, DailyInput), tmp_path).cities[0]
+    local = get_daily(daily(["Santiago"]), tmp_path).cities[0]
     assert utc_day.hours == 24 and local.hours == 23
     utc_mean = Fraction(utc_day.humidity_sum_pct) / utc_day.humidity_hours
-    assert utc_mean != Fraction(str(local.mean_humidity_pct)) and utc_day.humidity_hours == 24
-    assert round(float(utc_mean), 1) != local.mean_humidity_pct
+    local_mean = Fraction(int(local.humidity_sum_pct), local.humidity_hours)
+    assert utc_mean != local_mean and utc_day.humidity_hours == 24 and local.humidity_hours == 23
 
 
 TASK = {"date": DATE, "match": "any", "temperature_unit": "F", "wind_unit": "mph", "rain_unit": "in", "conditions": ["max_temp >= 95", "rain > 0.5"]}

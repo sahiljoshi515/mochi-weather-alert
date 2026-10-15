@@ -4,13 +4,12 @@
 
 Each case is what ~/mochi-dev/harness/scripted_task.py runs: the task's arguments, the scripted
 agent's steps and the expected verdict. The prescribed path is get_daily once with all 30 cities,
-then report_alerts over the cities in order, 10 per call when the conditions use 4 or 5 variables
-and 15 when they use fewer (so a hosted model's reply, reasoning included, stays inside its
-2,048-token cap), then submit with the report the last call returned: four or five tool calls of the
-hosted agent's six steps, the last step being its final answer.
-gold does it in one report_alerts call, gold_chunked in three, batched_daily reads the cities in
-two get_daily calls, corrected fixes an earlier chunk's mistakes in a later call, unexamined stops
-after two chunks, overlapping_calls restates five cities in two chunks, stale_old_version and
+(which gives each needed value in the task's units), then report_alerts twice with 15 examined
+cities each (so a hosted model's reply, reasoning included, stays inside its 2,048-token cap), then
+submit with the report the last call returned: four tool calls of the hosted agent's six steps.
+gold does it in one report_alerts call, gold_chunked in two, batched_daily reads the cities in
+two get_daily calls, corrected fixes the first chunk's mistakes in the second, unexamined stops
+after one chunk, overlapping_calls restates five cities in two chunks, stale_old_version and
 stale_previous_run plant a leftover file that the first call must replace, stale_no_calls and
 no_report submit without reporting, and divergent_submission submits something other than the
 report the last call returned. Each wrong case breaks the gold report in one way the plan lists as
@@ -39,10 +38,10 @@ from contract import AlertInput, AlertReportOutput, HourlyInput, PinOutput, Repo
 from plugin.alerts import get_hourly, pin_alerts, report_alerts, write_run_marker
 from plugin.data import snapshot
 from plugin.rules import (
+    CHUNK,
     MAX_CITIES_PER_CALL,
     Units,
     aggregate,
-    chunk_size,
     convert,
     evaluate,
     exact_metric,
@@ -87,8 +86,8 @@ def report_steps(task: dict, judgement: dict, chunks: int = 1, examined: list[st
 
 
 def prescribed_steps(task: dict, judgement: dict) -> list[dict]:
-    """The report_alerts calls of the prescribed path: chunk_size cities each, in order."""
-    return chunked_steps(task, judgement, names(), chunk_size(parse_conditions(task["conditions"])))
+    """The report_alerts calls of the prescribed path: CHUNK cities each, in order."""
+    return chunked_steps(task, judgement, names(), CHUNK)
 
 
 def chunked_steps(task: dict, judgement: dict, examined: list[str], size: int) -> list[dict]:
@@ -97,9 +96,9 @@ def chunked_steps(task: dict, judgement: dict, examined: list[str], size: int) -
     return steps
 
 
-def read_steps(date: str, batch: int = MAX_CITIES_PER_CALL) -> list[dict]:
+def read_steps(task: dict, batch: int = MAX_CITIES_PER_CALL) -> list[dict]:
     everyone = names()
-    return [{"tool": "get_daily", "arguments": {"cities": everyone[start : start + batch], "date": date}} for start in range(0, len(everyone), batch)]
+    return [{"tool": "get_daily", "arguments": {"task": task, "cities": everyone[start : start + batch]}} for start in range(0, len(everyone), batch)]
 
 
 def resolve(value, outputs):
@@ -242,23 +241,23 @@ def main() -> int:
     expected = expected_of(build_output(arguments, AlertInput), pinned)
     gold = expected_output(task, expected)
     judgement = judgement_of(gold)
-    read = read_steps(date)
+    read = read_steps(task)
     print(f"gold day {date}: rules {arguments['conditions']}; tie city {tie_city}; boundary city {boundary_city}; {len(gold['alerts'])} alerts")
     valid = {"valid": True, "score_min": 1.0}
     write_case("gold", f"The exact report for {date} in one report_alerts call, then submit: {tie_city}'s humidity is a rounding tie (half up), {boundary_city}'s high sits exactly on its threshold.",
                arguments, pinned, read + report_steps(task, judgement) + [SUBMIT_LAST], expect=valid, answer=summary(gold))
-    write_case("gold_chunked", "The prescribed path for four needed variables: get_daily with all 30 cities, three report_alerts calls of 10 examined cities each, then submit with the report the last call returned.",
+    write_case("gold_chunked", "The prescribed path: get_daily with the task and all 30 cities, two report_alerts calls of 15 examined cities each, then submit with the report the last call returned.",
                arguments, pinned, read + prescribed_steps(task, judgement) + [SUBMIT_LAST], expect=valid, answer=summary(gold))
     write_case("batched_daily", "The exact report after two get_daily calls of 15 instead of one.",
-               arguments, pinned, read_steps(date, batch=15) + report_steps(task, judgement) + [SUBMIT_LAST], expect=valid, answer=summary(gold))
+               arguments, pinned, read_steps(task, batch=15) + report_steps(task, judgement) + [SUBMIT_LAST], expect=valid, answer=summary(gold))
 
     chunks = prescribed_steps(task, judgement)
-    if len(chunks) != 3:
-        raise RuntimeError("the gold day's four needed variables prescribe three chunks")
-    two = json.loads(json.dumps(chunks[:2]))
-    two[-1]["save_as"] = "last"
-    write_case("unexamined", "Only two of the three report_alerts calls, then submit: ten cities are never examined.",
-               arguments, pinned, read + two + [SUBMIT_LAST], expect={"valid": False, "message_contains": "unexamined", "score_max": 0.7}, answer=summary(gold))
+    if len(chunks) != 2:
+        raise RuntimeError("the prescribed path has two chunks")
+    one = json.loads(json.dumps(chunks[:1]))
+    one[-1]["save_as"] = "last"
+    write_case("unexamined", "Only the first of the two report_alerts calls, then submit: fifteen cities are never examined.",
+               arguments, pinned, read + one + [SUBMIT_LAST], expect={"valid": False, "message_contains": "unexamined", "score_max": 0.6}, answer=summary(gold))
 
     # overlapping calls: the second chunk restates five cities of the first with the same judgement
     everyone = names()
@@ -274,9 +273,9 @@ def main() -> int:
     write_case("stale_old_version", "An older version's report (no task, another run's marker) lies in the workspace: the first report_alerts call replaces it.",
                arguments, pinned, read + [{"python": plant.format(date=date, content=json.dumps(old_shape))}] + chunks + [SUBMIT_LAST], expect=valid, answer=summary(gold))
     previous = {"date": date, "run": "deadbeefdeadbeef", "task": task, "examined": everyone, **judgement}
-    write_case("stale_previous_run", "A complete, correct report of an EARLIER run lies in the workspace and this run judges only 20 cities: the leftover is replaced, not inherited, so ten cities are unexamined.",
-               arguments, pinned, read + [{"python": plant.format(date=date, content=json.dumps(previous))}] + two + [SUBMIT_LAST],
-               expect={"valid": False, "message_contains": "unexamined", "score_max": 0.7}, answer=summary(gold))
+    write_case("stale_previous_run", "A complete, correct report of an EARLIER run lies in the workspace and this run judges only 15 cities: the leftover is replaced, not inherited, so fifteen cities are unexamined.",
+               arguments, pinned, read + [{"python": plant.format(date=date, content=json.dumps(previous))}] + one + [SUBMIT_LAST],
+               expect={"valid": False, "message_contains": "unexamined", "score_max": 0.6}, answer=summary(gold))
     write_case("stale_no_calls", "A complete, correct report of an earlier run lies in the workspace and the agent submits the right report without calling report_alerts: the verifier refuses the leftover.",
                arguments, pinned, read + [{"python": plant.format(date=date, content=json.dumps(previous))}] + [{"tool": "submit", "arguments": gold}],
                expect={"valid": False, "message_contains": "not a report of this run", "score_max": 0.0}, answer=summary(gold))
@@ -395,8 +394,8 @@ def main() -> int:
     santiago = next(row for row in dst_pin.metric if row.city == "Santiago")
     if santiago.hours != 23 or "Santiago" not in {a["city"] for a in dst_gold["alerts"]}:
         raise RuntimeError("Santiago is not a 23-hour alert on the DST day")
-    dst_read = read_steps(DST_DATE)
-    write_case("gold_dst", "The exact report for Santiago's 23-hour day (clocks went forward at midnight) on the prescribed path for two needed variables: two report_alerts calls of 15 cities, then submit.",
+    dst_read = read_steps(dst_task)
+    write_case("gold_dst", "The exact report for Santiago's 23-hour day (clocks went forward at midnight) on the prescribed path: two report_alerts calls of 15 cities, then submit.",
                dst_arguments, dst_pin, dst_read + prescribed_steps(dst_task, judgement_of(dst_gold)) + [SUBMIT_LAST], expect=valid, answer=summary(dst_gold))
 
     # Santiago aggregated over the 24 UTC hours of the date instead of its local day

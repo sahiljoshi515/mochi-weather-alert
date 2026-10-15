@@ -18,6 +18,19 @@
     {
       "tool": "get_daily",
       "arguments": {
+        "task": {
+          "date": "2026-07-07",
+          "match": "any",
+          "temperature_unit": "F",
+          "wind_unit": "mph",
+          "rain_unit": "in",
+          "conditions": [
+            "max_temp >= 101.3",
+            "humidity >= 80",
+            "rain > 0.5",
+            "wind >= 20"
+          ]
+        },
         "cities": [
           "Athens",
           "Auckland",
@@ -34,13 +47,25 @@
           "Lima",
           "London",
           "Madrid"
-        ],
-        "date": "2026-07-07"
+        ]
       }
     },
     {
       "tool": "get_daily",
       "arguments": {
+        "task": {
+          "date": "2026-07-07",
+          "match": "any",
+          "temperature_unit": "F",
+          "wind_unit": "mph",
+          "rain_unit": "in",
+          "conditions": [
+            "max_temp >= 101.3",
+            "humidity >= 80",
+            "rain > 0.5",
+            "wind >= 20"
+          ]
+        },
         "cities": [
           "Mexico City",
           "Moscow",
@@ -57,8 +82,7 @@
           "Tokyo",
           "Toronto",
           "Vancouver"
-        ],
-        "date": "2026-07-07"
+        ]
       }
     },
     {

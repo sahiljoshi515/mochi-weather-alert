@@ -47,8 +47,9 @@ def test_runs_a_gold_path_over_stdio(tmp_path: Path) -> None:
         listed = await session.call_tool("list_cities", {"date": DATE})
         assert not listed.isError
         names = [row["city"] for row in listed.structuredContent["cities"]]
-        daily = await session.call_tool("get_daily", {"cities": names[:10], "date": DATE})
+        daily = await session.call_tool("get_daily", {"task": TASK, "cities": names[:10]})
         assert not daily.isError and len(daily.structuredContent["cities"]) == 10
+        assert all(set(row["values"]) <= {"max_temp"} for row in daily.structuredContent["cities"])
         hours = await session.call_tool("get_hourly", {"city": "Santiago", "date": DATE})
         assert not hours.isError and len(hours.structuredContent["rows"]) == 23
         call = {"task": TASK, "examined": ["Cairo"], "alerts": [{"city": "Cairo", "values": {"max_temp": 98.8}, "matched": ["max_temp >= 95"]}], "unavailable": []}
@@ -60,7 +61,7 @@ def test_runs_a_gold_path_over_stdio(tmp_path: Path) -> None:
             "complete": False,
             "report": {"task": TASK, "alerts": call["alerts"], "unavailable": []},
         }
-        unknown = await session.call_tool("get_daily", {"cities": ["Atlantis"], "date": DATE})
+        unknown = await session.call_tool("get_daily", {"task": TASK, "cities": ["Atlantis"]})
         assert unknown.isError and "unknown city Atlantis" in unknown.content[0].text
         bad_date = await session.call_tool("list_cities", {"date": "2026-12-25"})
         assert bad_date.isError and "outside the snapshot" in bad_date.content[0].text
