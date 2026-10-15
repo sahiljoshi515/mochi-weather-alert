@@ -49,7 +49,7 @@ def test_runs_a_gold_path_over_stdio(tmp_path: Path) -> None:
         names = [row["city"] for row in listed.structuredContent["cities"]]
         daily = await session.call_tool("get_daily", {"task": TASK, "cities": names[:10]})
         assert not daily.isError and len(daily.structuredContent["cities"]) == 10
-        assert all(set(row["values"]) <= {"max_temp"} for row in daily.structuredContent["cities"])
+        assert all(set(row) == {"city", "hours", "missing", "values"} and set(row["values"]) <= {"max_temp"} for row in daily.structuredContent["cities"])
         hours = await session.call_tool("get_hourly", {"city": "Santiago", "date": DATE})
         assert not hours.isError and len(hours.structuredContent["rows"]) == 23
         call = {"task": TASK, "examined": ["Cairo"], "alerts": [{"city": "Cairo", "values": {"max_temp": 98.8}, "matched": ["max_temp >= 95"]}], "unavailable": []}

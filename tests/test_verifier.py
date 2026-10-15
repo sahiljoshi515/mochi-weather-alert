@@ -330,33 +330,29 @@ def test_checks_list_cities_and_get_daily_outputs(tmp_path: Path) -> None:
     assert verify_output("list_cities", {"date": "2026-09-05"}, listed, tmp_path)["valid"] is False
     short = {**listed, "cities": [{**listed["cities"][1], "hours_available": 22}]}
     assert verify_output("list_cities", {"date": DATE}, short, tmp_path)["valid"] is False
-    athens = {"city": "Athens", "country": "Greece", "hours": 24, "max_temp_c": 35.7, "min_temp_c": 23.1, "rain_mm": 0.0, "max_wind_kmh": 9.2, "humidity_sum_pct": 755.0, "humidity_hours": 24, "missing": []}
     values = {"max_temp": 96.26, "rain": 0.0, "wind": float(truncate(Fraction("9.2") / Fraction("1.609344")))}
-    daily = {"date": DATE, "cities": [{**athens, "values": values}]}
+    athens = {"city": "Athens", "hours": 24, "missing": [], "values": values}
+    daily = {"date": DATE, "cities": [athens]}
     asked = {"task": ARGUMENTS, "cities": ["Athens"]}
     assert verify_output("get_daily", asked, daily, tmp_path)["valid"] is True
     assert verify_output("get_daily", {"task": ARGUMENTS, "cities": ["Santiago"]}, daily, tmp_path)["valid"] is False
     assert verify_output("get_daily", {"task": {**ARGUMENTS, "date": "2026-09-05"}, "cities": ["Athens"]}, daily, tmp_path)["valid"] is False
-    upside_down = {**daily, "cities": [{**daily["cities"][0], "min_temp_c": 40.0}]}
-    assert verify_output("get_daily", asked, upside_down, tmp_path)["valid"] is False
-    unmarked = {**daily, "cities": [{**daily["cities"][0], "rain_mm": None}]}
-    assert verify_output("get_daily", asked, unmarked, tmp_path)["valid"] is False
-    # the values are the needed variables in the task's units, exactly as the metric aggregates give them
+    assert verify_output("get_daily", asked, {**daily, "cities": [{**athens, "hours": 26}]}, tmp_path)["valid"] is False
+    assert verify_output("get_daily", asked, {**daily, "cities": [{**athens, "missing": ["clouds"]}]}, tmp_path)["valid"] is False
+    # the values are exactly the needed variables the day has every hour of, plausible, with at most 9 decimals
     for wrong in (
-        {**values, "wind": 5.716615},  # rounded, not truncated
-        {**values, "wind": 5.7},
-        {**values, "max_temp": 35.7},  # left in °C
         {"max_temp": 96.26, "rain": 0.0},  # a needed variable missing
         {**values, "humidity": 31.458333333},  # a variable no condition uses
+        {**values, "wind": 5.7166149246},  # 10 decimals
+        {**values, "rain": -0.1},
+        {**values, "max_temp": 200.0},
     ):
         found = verify_output("get_daily", asked, {**daily, "cities": [{**athens, "values": wrong}]}, tmp_path)
-        assert found["valid"] is False and "values are not" in found["message"], wrong
-    # a variable with a missing hour is not given, and the humidity figures must agree
-    gap = {**athens, "max_temp_c": None, "min_temp_c": None, "missing": ["temperature_2m"], "values": {"rain": 0.0, "wind": values["wind"]}}
+        assert found["valid"] is False, wrong
+    # a variable with a missing hour is not given
+    gap = {**athens, "missing": ["temperature_2m"], "values": {"rain": 0.0, "wind": values["wind"]}}
     assert verify_output("get_daily", asked, {**daily, "cities": [gap]}, tmp_path)["valid"] is True
     assert verify_output("get_daily", asked, {**daily, "cities": [{**gap, "values": values}]}, tmp_path)["valid"] is False
-    assert verify_output("get_daily", asked, {**daily, "cities": [{**athens, "humidity_hours": 25, "values": values}]}, tmp_path)["valid"] is False
-    assert verify_output("get_daily", asked, {**daily, "cities": [{**athens, "humidity_sum_pct": 2500.0, "values": values}]}, tmp_path)["valid"] is False
 
 
 def test_checks_get_hourly_output(tmp_path: Path) -> None:

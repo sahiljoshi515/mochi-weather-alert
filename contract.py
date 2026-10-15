@@ -137,14 +137,7 @@ class DailyInput(Output):
 @dataclass
 class DailyCity(Output):
     city: str
-    country: str
     hours: Annotated[int, HOURS]
-    max_temp_c: Annotated[float | None, "The day's highest hourly temperature, °C; null when no hour has one"]
-    min_temp_c: Annotated[float | None, "The day's lowest hourly temperature, °C; null when no hour has one"]
-    rain_mm: Annotated[float | None, "The precipitation total over the hours that have one, mm; null when none has"]
-    max_wind_kmh: Annotated[float | None, "The day's highest hourly wind speed, km/h; null when no hour has one"]
-    humidity_sum_pct: Annotated[float | None, "The sum of the hourly relative humidities present, %; null when none is"]
-    humidity_hours: Annotated[int, "How many hours have a relative humidity"]
     missing: Annotated[list[str], MISSING]
     values: Annotated[
         dict[str, float],

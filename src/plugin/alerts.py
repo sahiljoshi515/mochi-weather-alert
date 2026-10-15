@@ -130,7 +130,8 @@ def list_cities(given: CitiesInput, workspace: Path) -> CitiesOutput:
 
 
 def get_daily(given: DailyInput, workspace: Path) -> DailyOutput:
-    """Up to 30 cities' local-day aggregates in metric units, and each needed variable in the task's units."""
+    """Up to 30 cities' local days for a task: each needed variable in the task's units, the hour count, and
+    the source variables with a missing hour. Nothing else, so the agent has nothing to re-derive."""
     task = plain_task(given.task)
     problem = task_problem(task)
     if problem:
@@ -152,14 +153,7 @@ def get_daily(given: DailyInput, workspace: Path) -> DailyOutput:
         rows.append(
             DailyCity(
                 city=name,
-                country=data.city(name).country,
                 hours=day.hours,
-                max_temp_c=number(day.max_temp_c),
-                min_temp_c=number(day.min_temp_c),
-                rain_mm=number(day.rain_mm),
-                max_wind_kmh=number(day.max_wind_kmh),
-                humidity_sum_pct=number(day.humidity_sum_pct),
-                humidity_hours=day.humidity_hours,
                 missing=list(day.missing),
                 values={variable: float(value) for variable, value in given_values(day, conditions, units).items()},
             )

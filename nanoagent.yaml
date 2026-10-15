@@ -1,7 +1,7 @@
 _ > nanoagent.plugin.manifest.ManifestConfig:
 id: weather-alert
 name: Weather Alert
-version: 0.3.0
+version: 0.3.1
 status: ready
 nanoagent: ~=0.5.0
 
@@ -22,7 +22,7 @@ tools > dict[contract.Tool, nanoagent.plugin.manifest.ToolConfig]:
   list_cities:
     description: List the snapshot's 30 cities with how many hours each one's local calendar day has on a date
   get_daily:
-    description: Get up to 30 cities' local-day aggregates for a task, in metric units (°C, mm, km/h, %) and, for each variable the conditions use, in the task's units exact to 9 decimals, with any missing variables
+    description: Get up to 30 cities' local days for a task, each variable the conditions use in the task's units exact to 9 decimals, with each day's hour count and any missing variables
   get_hourly:
     description: Get one city's hourly rows over its local calendar day, in metric units
   report_alerts:
@@ -39,7 +39,7 @@ tasks > dict[contract.Task, nanoagent.plugin.manifest.TaskConfig]:
       Rules. A condition is "<variable> <op> <number>". max_temp and min_temp are the day's highest and lowest hourly temperature, rain is the day's precipitation total, wind is the day's highest hourly wind speed, and humidity is the day's mean relative humidity in % (the arithmetic mean over the hours present). op is >=, >, <= or <, and the number is in the requested units. With match "all" a city is an alert when every condition holds for it; with "any" when at least one does. The day is each city's local calendar day: it has 23 hours when clocks go forward, 25 when they go back, else 24.
       Cities. The 30 cities are Athens, Auckland, Bangkok, Buenos Aires, Cairo, Cape Town, Denver, Dubai, Honolulu, Houston, Jakarta, Lagos, Lima, London, Madrid, Mexico City, Moscow, Mumbai, Nairobi, Oslo, Perth, Phoenix, Reykjavik, Santiago, Seoul, Singapore, Sydney, Tokyo, Toronto, Vancouver.
       Plan. Exactly four tool calls, one per step, nothing else: (1) get_daily once, with the task input copied exactly as given and all 30 cities; (2) report_alerts for the first 15 cities in the order above; (3) report_alerts for the last 15; (4) submit. Never judge more than 15 cities in one step, and reason briefly: one short line of numbers per city, no prose.
-      Data. For each city, get_daily gives the day's metric aggregates (°C, mm, km/h, the humidity sum and its hours), its hour count, the source variables with a missing hour, and values: each variable the conditions use, already in the task's units, exact to 9 decimals (truncated, never rounded). Judge every city from its values alone.
+      Data. For each city, get_daily gives its hour count, the source variables with a missing hour, and values: each variable the conditions use, already in the task's units, exact to 9 decimals (truncated, never rounded). They are exact: never convert, recompute or verify them. Judge every city from its values alone.
       Comparing and rounding. Test each condition against the value exactly as given, never after rounding it: 24.979121927 is not >= 25, and a value equal to its threshold satisfies >= and <= but not > or <. Report each value rounded to 1 decimal, half up (ties go up): 24.95 becomes 25.0, 71.25 becomes 71.3, 24.979121927 becomes 25.0.
       Missing data. A city whose values lack a variable a condition uses (its "missing" names that variable's source: max_temp and min_temp come from temperature_2m, rain from precipitation, wind from wind_speed_10m, humidity from relative_humidity_2m) goes under unavailable with those variables, and is never an alert, whatever its other values.
       Reporting. Each report_alerts call takes task (the task input, copied exactly as given), examined (the cities it judges), alerts (every examined city whose day satisfies the rules: values, one entry per variable the conditions use, in the requested units, rounded as above, and matched, the conditions that hold for it, as given in the task) and unavailable (every examined city with a missing hour for a needed variable, with those variables). Use [] where there are none. The call merges its judgement into reports/<date>.json and returns the merged report so far: examined (how many cities), complete, and report. Keep each step brief: convert, compare, call the tool; the next step continues with the next cities.
