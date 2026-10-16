@@ -8,12 +8,13 @@ receipt of the data read (<date>.source.json), the report (<date>.json) and the 
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import secrets
 import shutil
+import tempfile
 import threading
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -46,7 +47,6 @@ from plugin.rules import (
     RUN_TOKEN,
     Units,
     canonical_task,
-    choose,
     date_problem,
     date_text,
     day_metrics,
@@ -62,6 +62,7 @@ from plugin.rules import (
     source_label,
     stamp_text,
     task_problem,
+    usable,
     weekday,
     windows_of,
 )
@@ -78,7 +79,9 @@ PRUNE_AFTER_SECONDS = 3600
 # the submitted report, so the verifier judges exactly this run's files.
 RUN = secrets.token_hex(8)
 LOCK = threading.Lock()
-STARTED = datetime.now(UTC)
+# Writes whose temporary file had to go beside the target (the call log notes how many), and whether the
+# launch's TMPDIR is on another volume than the workspace, so that every write must.
+WRITES = {"beside": 0, "cross_device": False}
 
 
 def checked_task(given: AlertInput) -> dict:
@@ -138,14 +141,40 @@ def pin_alerts(given: AlertInput, workspace: Path) -> PinOutput:
 
 
 def write_atomic(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` through a temporary file and one rename, so a reader never sees a half-written file."""
+    """Write ``text`` to ``path`` in one rename, so a reader never sees a half-written file. The temporary
+    file is written in the launch's own TMPDIR and renamed into place, so the workspace never holds one: a host
+    copying the workspace at that moment (to stage another task call) would trip over a file that vanishes.
+    When that fails (TMPDIR on another volume), the temporary file goes beside ``path`` instead."""
+    if not WRITES["cross_device"] and replaced_from_tmpdir(path, text):
+        return
+    WRITES["beside"] += 1
     temp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     temp.write_text(text, encoding="utf-8")
     os.replace(temp, path)
 
 
+def replaced_from_tmpdir(path: Path, text: str) -> bool:
+    """Whether ``text`` went to ``path`` through a temporary file in the launch's TMPDIR and one rename. A
+    rename across volumes fails every time, so after one the process stops trying."""
+    try:
+        handle, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp")
+    except OSError:
+        return False
+    temp = Path(name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as file:
+            file.write(text)
+        temp.chmod(0o644)
+        os.replace(temp, path)
+    except OSError as error:
+        temp.unlink(missing_ok=True)
+        WRITES["cross_device"] = WRITES["cross_device"] or error.errno == errno.EXDEV
+        return False
+    return True
+
+
 def started_of(folder: Path) -> float:
-    """When a run folder's run started (epoch seconds), from its marker, else the folder's mtime."""
+    """When a run folder's run began (epoch seconds), from its marker, else the folder's mtime."""
     try:
         found = json.loads((folder / RUN_MARKER).read_text(encoding="utf-8"))
         return datetime.fromisoformat(found["started"]).timestamp()
@@ -153,7 +182,22 @@ def started_of(folder: Path) -> float:
         try:
             return folder.stat().st_mtime
         except OSError:
-            return time.time()
+            return sources.now().timestamp()
+
+
+def remove_folder(folder: Path) -> None:
+    """Remove a run folder, first renamed out of the workspace in one step (into the launch's TMPDIR), so a
+    host copying the workspace never finds it half removed; removed in place when it cannot be moved."""
+    try:
+        holder = Path(tempfile.mkdtemp(prefix="weather-alert-pruned-"))
+    except OSError:
+        shutil.rmtree(folder, ignore_errors=True)
+        return
+    try:
+        os.replace(folder, holder / folder.name)
+    except OSError:
+        shutil.rmtree(folder, ignore_errors=True)
+    shutil.rmtree(holder, ignore_errors=True)
 
 
 def prune(workspace: Path) -> None:
@@ -164,18 +208,21 @@ def prune(workspace: Path) -> None:
     if len(others) < KEEP_RUNS:
         return
     others.sort(key=started_of)
-    now = time.time()
+    now = sources.now().timestamp()
     for folder in others[: len(others) - KEEP_RUNS + 1]:
         if now - started_of(folder) > PRUNE_AFTER_SECONDS:
-            shutil.rmtree(folder, ignore_errors=True)
+            remove_folder(folder)
 
 
 def ensure_run_folder(workspace: Path) -> Path:
-    """This run's folder, reports/<run>/, made with its marker on first use (pruning old runs then)."""
+    """This run's folder, reports/<run>/, made on first use with its marker: the run's token and when it
+    began, by the clock the answer key reads (pruning old runs then). The run's first tool call makes it, after
+    the answer key has pinned the data, so the verifier holds the run to have begun no earlier."""
     folder = workspace.resolve() / run_folder(RUN)
     if not (folder / RUN_MARKER).is_file():
         folder.mkdir(parents=True, exist_ok=True)
-        write_atomic(folder / RUN_MARKER, json.dumps({"run": RUN, "started": STARTED.isoformat(timespec="seconds")}, indent=2) + "\n")
+        started = sources.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        write_atomic(folder / RUN_MARKER, json.dumps({"run": RUN, "started": started}, indent=2) + "\n")
         prune(workspace)
     return folder
 
@@ -253,6 +300,7 @@ def log_call(workspace: Path, name: str, arguments: dict, result: str, seconds: 
             **call_summary(name, arguments),
             "seconds": round(seconds, 2),
             "result": result[:200],
+            **({"temp_beside": WRITES["beside"]} if WRITES["beside"] else {}),
         }
     )
     try:
@@ -331,14 +379,15 @@ def report_alerts(given: ReportInput, workspace: Path) -> ReportOutput:
 
 
 def check_date(given: DateInput, workspace: Path) -> DateOutput:
-    """Today's UTC date from the clock, and which data a daily-alert task on a date would use."""
+    """Today's UTC date from the clock, and which data a daily-alert task on a date would use: refused, as
+    the task's answer key refuses it, when the rules allow it only at the clock and not 10 minutes before."""
     clock = sources.epoch_minutes(sources.now())
     today = date_text(clock // 1440)
     date = today if given.date.strip().lower() == "today" else given.date
     windows = windows_of(clock // 1440)
     problem = date_problem(date)
     calendar_day = problem is None or problem.startswith(f"{date} is before")
-    choice = None if problem else choose(date, clock)
+    choice = None if problem else usable(date, clock)
     if choice is not None and choice.problem:
         problem = choice.problem
     if problem:

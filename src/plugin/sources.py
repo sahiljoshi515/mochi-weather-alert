@@ -32,6 +32,7 @@ from plugin.rules import (
     stamp_minutes,
     stamp_text,
     stamps_inside,
+    usable,
 )
 
 SKEW_LIMIT = timedelta(minutes=5)
@@ -170,23 +171,17 @@ def pin(date: str) -> tuple[int, list[Fetched]]:
     """The answer key's data: the clock reading (UTC minutes) and the sources the rules choose at
     now - DELTA_MINUTES and at now, one or two, each fetched once."""
     latest = epoch_minutes(now())
+    # Refused when the rules refuse the date at either reading: a date that came into range within the last
+    # DELTA_MINUTES would still be refused by the agent's tools, which read the clock that much behind.
+    refused = usable(date, latest).problem
+    if refused:
+        raise ValueError(refused)
     readings = [latest - DELTA_MINUTES, latest]
-    choices = [choose(date, reading) for reading in readings]
-    if choices[1].problem:
-        raise ValueError(choices[1].problem)
-    if choices[0].problem:
-        # The allowed range only grows with time (the outlook gains a month on the 7th): the date came into
-        # range within the last DELTA_MINUTES, so the agent's tools, which read the clock that much behind,
-        # would still refuse it. Refuse it here instead, saying when it works.
-        raise ValueError(
-            f"{date} came into range only in the last {DELTA_MINUTES} minutes (the seasonal outlook reaches a month "
-            f"further on the 7th of each month): run again after {stamp_text(latest + DELTA_MINUTES)} UTC."
-        )
-    usable = list(zip(readings, choices, strict=True))
-    if same(usable[0][1], usable[1][1]):
-        usable = usable[1:]
-    with ThreadPoolExecutor(max_workers=len(usable)) as pool:
-        found = list(pool.map(lambda pair: fetch(pair[1], pair[0]), usable))
+    pairs = [(reading, choose(date, reading)) for reading in readings]
+    if same(pairs[0][1], pairs[1][1]):
+        pairs = pairs[1:]
+    with ThreadPoolExecutor(max_workers=len(pairs)) as pool:
+        found = list(pool.map(lambda pair: fetch(pair[1], pair[0]), pairs))
     distinct: dict[tuple, Fetched] = {}
     for candidate in found:
         distinct[candidate.key] = candidate  # the later reading's wins a tie

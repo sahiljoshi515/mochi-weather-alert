@@ -85,14 +85,21 @@ WIND_UNITS = ("kmh", "mph", "ms")
 RAIN_UNITS = ("mm", "in")
 MIN_CONDITIONS = 1
 MAX_CONDITIONS = 6
-# How many decimals get_daily gives a value in the task's units: truncated, never rounded, so comparing
-# it with a threshold of at most 2 decimals and rounding it to 1 decimal (ties away from zero) give the exact
-# answers, negatives included (see round_half_up).
+# Readings carry at most this many decimals: Open-Meteo gives 1 (0 for humidity), and 2 for a forecast run's
+# precipitation spread over its hours (0.03). Data with more is refused, because the exact answers rely on it.
+READING_PLACES = 2
+# How many decimals get_daily gives a value in the task's units: truncated, never rounded. With readings of at
+# most 2 decimals, a converted value or a humidity mean differs from a threshold of at most 2 decimals by 0 or
+# by at least 6e-9 (km/h to mph is the closest case), so the cut value compares with a threshold as the exact
+# one does, and rounding it to 1 decimal (ties away from zero) gives the exact value's report, negatives
+# included (see round_half_up).
 GIVEN_PLACES = 9
 PLACES = 1  # reported values carry one decimal
 # ASCII digits only: "\d" would accept other scripts' digits, and dates go into URLs and file names.
 DATE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
 STAMP = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2})")
+# When a fetch answered, or a run made its folder: a UTC time to the second.
+SECONDS_STAMP = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
 CONDITION = re.compile(r"\s*(max_temp|min_temp|rain|wind|humidity)\s*(>=|<=|>|<)\s*([+-]?(?:[0-9]+(?:\.[0-9]{1,2})?|\.[0-9]{1,2}))\s*")
 GRAMMAR = (
     'a condition is "<variable> <op> <number>": variable max_temp, min_temp, rain, wind or humidity; '
@@ -109,6 +116,10 @@ SOURCE_RANGES = {
     "precipitation": (Decimal(0), Decimal(1000)),
     "wind_speed_10m": (Decimal(0), Decimal(500)),
 }
+# Open-Meteo's grid point: latitude, longitude and elevation (m).
+GRID_RANGES = ((Decimal(-90), Decimal(90)), (Decimal(-180), Decimal(180)), (Decimal(-500), Decimal(9000)))
+# A reported value's size, far beyond any real one: a larger number is malformed.
+MAX_REPORTED = 10**9
 
 # ----- Which data a date is judged on -----
 # Every source is named; Open-Meteo's best_match is never used, because it switches sources silently.
@@ -271,6 +282,20 @@ def stamp_text(minutes: int) -> str:
     return f"{date_text(minutes // 1440)}T{minutes % 1440 // 60:02d}:{minutes % 60:02d}"
 
 
+def stamp_seconds(text: object) -> int | None:
+    """Seconds since 1970-01-01T00:00Z of a UTC time "YYYY-MM-DDTHH:MM:SSZ", or None."""
+    found = SECONDS_STAMP.fullmatch(text) if isinstance(text, str) else None
+    minutes = stamp_minutes(text[:16]) if found else None
+    if minutes is None or int(found.group(6)) > 59:
+        return None
+    return minutes * 60 + int(found.group(6))
+
+
+def seconds_text(seconds: int) -> str:
+    """A second count as "YYYY-MM-DDTHH:MM:SSZ" (UTC)."""
+    return f"{stamp_text(seconds // 60)}:{seconds % 60:02d}Z"
+
+
 def weekday(text: str) -> str:
     """The weekday of a date (1970-01-01 was a Thursday)."""
     return ("Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday")[day_number(text) % 7]
@@ -343,6 +368,23 @@ def choose(text: str, clock: int) -> Choice:
         return Choice(text, date_text(today), DataKind.OUTLOOK.value, "ecmwf_seas5_ensemble_mean", (), 6, "")
     problem = f"{text} is after {date_text(last)}, the last day the ECMWF seasonal outlook covers. {ranges_text(today)}"
     return Choice(text, date_text(today), "", "", (), 0, problem)
+
+
+def usable(text: str, clock: int) -> Choice:
+    """The data a daily-alert task on ``text`` (a date that passes date_problem) uses when its answer key reads
+    the clock at ``clock``: the rules' choice there, provided they also allow the date DELTA_MINUTES earlier,
+    where the agent's tools read the clock. The allowed range only grows with time (the outlook reaches a month
+    further on the 7th), so a date refused there came into range within the last DELTA_MINUTES: it is refused,
+    with the first time a task on it works."""
+    choice = choose(text, clock)
+    if choice.problem or not choose(text, clock - DELTA_MINUTES).problem:
+        return choice
+    entered = next(minute for minute in range(clock - DELTA_MINUTES + 1, clock + 1) if not choose(text, minute).problem)
+    problem = (
+        f"{text} came into range only in the last {DELTA_MINUTES} minutes (the seasonal outlook reaches a month "
+        f"further on the 7th of each month): a task on it works from {stamp_text(entered + DELTA_MINUTES)} UTC."
+    )
+    return Choice(text, choice.today, "", "", (), 0, problem)
 
 
 def source_key(kind: str, model: str, run: str, step_hours: int) -> tuple[str, str, str, int]:
@@ -420,12 +462,38 @@ def stamps_inside(start: int, end: int, step_minutes: int, *, accumulated: bool)
 
 
 def exact_reading(value: object) -> Decimal | None:
-    """A reading from JSON (a number or null) as the decimal its shortest text means."""
+    """A reading from JSON (a number or null) as the decimal its shortest text means. series_problem refuses
+    anything else before any arithmetic: here it raises."""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{value!r} is not a reading")
-    return Decimal(repr(float(value)))
+    if isinstance(value, int):
+        return Decimal(value)
+    if not math.isfinite(value):
+        raise ValueError(f"{value!r} is not a finite reading")
+    return Decimal(repr(value))
+
+
+def shown(value: object) -> str:
+    """A JSON value as short text for a message."""
+    text = repr(value)
+    return text if len(text) <= 24 else text[:20] + "…"
+
+
+def number_problem(value: object, low: Decimal, high: Decimal, places: int | None = None) -> str | None:
+    """What is wrong with a JSON number from ``low`` to ``high`` with at most ``places`` decimals (any when
+    None), in words that follow the value, or None. Checked before any arithmetic touches it."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return "is not a number"
+    if isinstance(value, float) and not math.isfinite(value):
+        return "is not a finite number"
+    exact = exact_reading(value)
+    if not low <= exact <= high:
+        return f"is outside {low} to {high}"
+    if places is not None and exact.as_tuple().exponent < -places:
+        return f"has more than {places} decimals (Open-Meteo gives at most {places}, and the exact answers rely on it)"
+    return None
 
 
 def day_metrics(series: dict, step_hours: int) -> DayMetrics:
@@ -532,8 +600,8 @@ def series_problem(date: str, step_hours: int, series: object) -> str | None:
     if not isinstance(series, dict) or set(series) != keys:
         return "a city's series must hold city, timezone, start, end, offsets, grid, times and the four variables"
     city = series["city"]
-    if city not in TIMEZONE_OF:
-        return f"{city!r} is not one of the cities"
+    if not isinstance(city, str) or city not in TIMEZONE_OF:
+        return f"{shown(city)} is not one of the cities"
     if series["timezone"] != TIMEZONE_OF[city]:
         return f"{city}: time zone {series['timezone']!r} is not {TIMEZONE_OF[city]}"
     start, end = stamp_minutes(series["start"]), stamp_minutes(series["end"])
@@ -556,8 +624,12 @@ def series_problem(date: str, step_hours: int, series: object) -> str | None:
     if start < day * 1440 + WINDOW_FIRST_MINUTE or end > day * 1440 + WINDOW_LAST_MINUTE:
         return f"{city}: the day falls outside {stamp_text(day * 1440 + WINDOW_FIRST_MINUTE)}Z to {stamp_text(day * 1440 + WINDOW_LAST_MINUTE)}Z"
     grid = series["grid"]
-    if not isinstance(grid, list) or len(grid) != 3 or any(isinstance(value, bool) or not isinstance(value, int | float) for value in grid):
+    if not isinstance(grid, list) or len(grid) != 3:
         return f"{city}: grid must be the grid point's latitude, longitude and elevation"
+    for name, value, (low, high) in zip(("latitude", "longitude", "elevation"), grid, GRID_RANGES, strict=True):
+        problem = number_problem(value, low, high)
+        if problem:
+            return f"{city}: the grid point's {name} {shown(value)} {problem}"
     times = series["times"]
     if not isinstance(times, list):
         return f"{city}: times must be a list"
@@ -575,13 +647,10 @@ def series_problem(date: str, step_hours: int, series: object) -> str | None:
         if not isinstance(values, list) or len(values) != len(times):
             return f"{city}: {variable} must have one reading per time"
         low, high = SOURCE_RANGES[variable]
-        for value in values:
-            if value is None:
-                continue
-            if isinstance(value, bool) or not isinstance(value, int | float):
-                return f"{city}: {variable} holds a non-number"
-            if not low <= exact_reading(value) <= high:
-                return f"{city}: {variable} reading {value} is outside {low} to {high}"
+        for time, value in zip(times, values, strict=True):
+            problem = None if value is None else number_problem(value, low, high, READING_PLACES)
+            if problem:
+                return f"{city}: {variable} reading {shown(value)} at {time}Z {problem}"
     return None
 
 
@@ -781,15 +850,36 @@ def plain_source(source) -> dict:
     }
 
 
+# Each kind of data's Open-Meteo models and hours between readings.
+MODELS = {
+    DataKind.ARCHIVE.value: ("era5", "ecmwf_ifs"),
+    DataKind.FORECAST.value: ("ecmwf_ifs",),
+    DataKind.OUTLOOK.value: ("ecmwf_seas5_ensemble_mean",),
+}
+STEP_HOURS = {DataKind.ARCHIVE.value: 1, DataKind.FORECAST.value: 1, DataKind.OUTLOOK.value: 6}
+
+
 def source_problem(source: object) -> str | None:
-    """What is wrong with a plain data source, or None."""
+    """What is wrong with a plain data source, or None: each field of its type, a model and step its kind
+    has, a forecast's run at 00, 06, 12 or 18 UTC (empty otherwise), and the label they give."""
     if not isinstance(source, dict) or set(source) != set(SOURCE_KEYS):
         return "the data source must hold kind, model, run, step_hours, today and label"
-    if source["kind"] not in [kind.value for kind in DataKind]:
+    kind, model, run, step = source["kind"], source["model"], source["run"], source["step_hours"]
+    if not isinstance(kind, str) or kind not in MODELS:
         return "the data source's kind must be archive, forecast or outlook"
+    if not isinstance(model, str) or model not in MODELS[kind]:
+        return f"the data source's model must be {' or '.join(MODELS[kind])} for the {kind}"
+    if kind == DataKind.FORECAST.value:
+        minutes = stamp_minutes(run)
+        if minutes is None or minutes % 360:
+            return "a forecast's run must be a UTC time YYYY-MM-DDTHH:MM at 00, 06, 12 or 18"
+    elif run != "":
+        return "only a forecast names a run"
+    if not isinstance(step, int) or isinstance(step, bool) or step != STEP_HOURS[kind]:
+        return f"the data source's step_hours must be {STEP_HOURS[kind]} for the {kind}"
     if date_problem(source["today"]):
         return "the data source's today must be a date"
-    expected = source_label(source["kind"], source["model"], source["run"], source["step_hours"])
+    expected = source_label(kind, model, run, step)
     if source["label"] != expected:
         return f"the data source's label must be {expected!r}"
     return None
@@ -840,6 +930,13 @@ def is_number(value: object) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
 
 
+def reported_number(value: object) -> bool:
+    """Whether a reported value is a finite JSON number of at most MAX_REPORTED in size."""
+    if not is_number(value) or (isinstance(value, float) and not math.isfinite(value)):
+        return False
+    return abs(value) <= MAX_REPORTED
+
+
 def names_ok(names: object) -> bool:
     return isinstance(names, list) and all(isinstance(name, str) and name.strip() for name in names)
 
@@ -865,8 +962,8 @@ def judgement_problem(task: dict, examined: object, alerts: object, unavailable:
         if city not in CITY_NAMES:
             return f"{city!r} is not one of the 30 cities (names are spelled as the task lists them)"
         values = alert["values"]
-        if not isinstance(values, dict) or not all(key in VARIABLES and is_number(value) and math.isfinite(value) for key, value in values.items()):
-            return f"{city}: values must map condition variables to finite numbers"
+        if not isinstance(values, dict) or not all(key in VARIABLES and reported_number(value) for key, value in values.items()):
+            return f"{city}: values must map condition variables to finite numbers (at most 1e9 in size)"
         if set(values) != set(needed):
             return f"{city}: values must hold exactly the variables the conditions use: {', '.join(needed)}"
         if not isinstance(alert["matched"], list) or not all(isinstance(text, str) for text in alert["matched"]):

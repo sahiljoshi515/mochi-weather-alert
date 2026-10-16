@@ -73,10 +73,22 @@ def test_a_tampered_pinned_reading_fails_answer_key_data(offline) -> None:
     run = Run(task_for("2026-07-07"), offline, clock=T0)
     run.gold()
     pin = pinned(run)
-    pin["candidates"][0]["cities"][3]["temperature_2m"][5] += 0.1
+    readings = pin["candidates"][0]["cities"][3]["temperature_2m"]
+    readings[5] = round(readings[5] + 0.1, 1)
     found = verdict_with_pin(run, pin)
     assert failed(found)[0] == "answer-key-data" and "sha256" in found["message"]
     assert "agent-source" in unchecked(found)
+
+
+def test_a_pinned_reading_with_more_decimals_than_open_meteo_gives_fails_answer_key_data(offline) -> None:
+    """WA-09: the exact answers rely on readings of at most 2 decimals; a float sum like 2.7 + 0.1 has 16."""
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    run.gold()
+    pin = pinned(run)
+    pin["candidates"][0]["cities"][3]["temperature_2m"][5] = 2.7 + 0.1
+    found = verdict_with_pin(run, pin)
+    assert failed(found)[0] == "answer-key-data"
+    assert "Buenos Aires: temperature_2m reading 2.8000000000000003 at 2026-07-07T08:00Z has more than 2 decimals" in found["message"]
 
 
 def test_pinned_alerts_that_disagree_with_their_readings_fail_answer_key_data(offline) -> None:
@@ -135,12 +147,62 @@ def test_a_report_left_by_an_earlier_task_fails_this_run(offline, monkeypatch) -
     assert later.verdict()["valid"]
 
 
+def test_a_report_left_by_an_earlier_task_fails_this_run_when_the_answer_key_never_saw_the_folder(offline, monkeypatch) -> None:
+    """R2-01: staged as the command line stages a task, the answer key's scratch holds only the inputs, so it
+    lists no prior runs. The earlier run's marker says it began an hour before the answer key's clock."""
+    task = task_for("2026-07-07")
+    monkeypatch.setattr(alerts, "RUN", "aaaaaaaaaaaaaaaa")
+    earlier = Run(task, offline, clock=T0 - timedelta(hours=1))
+    old_report = earlier.gold()
+    monkeypatch.setattr(alerts, "RUN", "bbbbbbbbbbbbbbbb")
+    later = Run(task, offline, clock=T0, workspace=earlier.workspace, staging="cli")
+    assert later.pin.prior_runs == []
+    found = later.verdict(old_report)
+    assert failed(found)[0] == "this-run" and found["score"] == 0.0
+    assert "run aaaaaaaaaaaaaaaa began before this task (at 2026-10-16T03:00:20Z, before the answer key finished pinning the data at 2026-10-16T04:00:00Z)" in found["message"]
+    later.gold()
+    assert later.verdict()["valid"], "this task's own run, begun after the answer key, passes"
+
+
+def test_a_run_begun_seconds_before_the_answer_key_finished_fails_this_run(offline, monkeypatch) -> None:
+    """R2-01: the clock has minutes, the fetches seconds. An earlier run that made its folder in the same minute
+    as the answer key, but before its fetch (04:00:10 against 04:00:30), is still an earlier task's."""
+    monkeypatch.setattr(alerts, "RUN", "aaaaaaaaaaaaaaaa")
+    run = Run(task_for("2026-07-07"), offline, clock=T0 + timedelta(seconds=30))
+    run.gold()
+    assert run.verdict()["valid"]
+    (run.folder / "run.json").write_text(json.dumps({"run": "aaaaaaaaaaaaaaaa", "started": "2026-10-16T04:00:10Z"}))
+    found = run.verdict()
+    assert failed(found) == ["this-run"]
+    assert "began before this task (at 2026-10-16T04:00:10Z, before the answer key finished pinning the data at 2026-10-16T04:00:30Z)" in found["message"]
+
+
+@pytest.mark.parametrize(
+    ("marker", "words"),
+    [
+        ({"run": "aaaaaaaaaaaaaaaa"}, "is not the marker of run aaaaaaaaaaaaaaaa: it must hold run and started"),
+        ({"run": "aaaaaaaaaaaaaaaa", "started": "2026-10-16T04:00:20+00:00"}, "started must be a UTC time YYYY-MM-DDTHH:MM:SSZ"),
+        ({"run": "aaaaaaaaaaaaaaaa", "started": 1760587220}, "started must be a UTC time YYYY-MM-DDTHH:MM:SSZ, not 1760587220"),
+        ({"run": "aaaaaaaaaaaaaaaa", "started": "2026-10-16T03:59:59Z"}, "began before this task (at 2026-10-16T03:59:59Z"),
+    ],
+)
+def test_a_run_marker_that_is_malformed_or_too_early_fails_this_run(offline, monkeypatch, marker: dict, words: str) -> None:
+    monkeypatch.setattr(alerts, "RUN", "aaaaaaaaaaaaaaaa")
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    run.gold()
+    (run.folder / "run.json").write_text(json.dumps(marker))
+    found = run.verdict()
+    assert failed(found) == ["this-run"] and words in found["message"], found["message"]
+    assert "reports/aaaaaaaaaaaaaaaa/run.json" in found["message"] or "began before" in words
+
+
 def test_a_receipt_naming_another_run_fails_agent_read_as_altered(offline) -> None:
     run = Run(task_for("2026-07-07"), offline, clock=T0)
     run.gold()
     rewrite(receipt_file(run), lambda receipt: receipt.update(run="0123456789abcdef"))
     found = run.verdict()
-    assert failed(found)[0] == "agent-read" and "the receipt was altered after get_daily" in found["message"]
+    assert failed(found)[0] == "agent-read"
+    assert f"the receipt reports/{alerts.RUN}/2026-07-07.source.json was altered after get_daily: it names run '0123456789abcdef'" in found["message"]
 
 
 def test_a_receipt_changed_after_get_daily_fails_agent_read(offline) -> None:
@@ -148,7 +210,7 @@ def test_a_receipt_changed_after_get_daily_fails_agent_read(offline) -> None:
     run.gold()
     rewrite(receipt_file(run), lambda receipt: receipt["cities"][0]["temperature_2m"].__setitem__(0, receipt["cities"][0]["temperature_2m"][0] + 1))
     found = run.verdict()
-    assert failed(found)[0] == "agent-read" and "the receipt was altered after get_daily: its readings no longer match its own sha256" in found["message"]
+    assert failed(found)[0] == "agent-read" and "2026-07-07.source.json was altered after get_daily: its readings no longer match its own sha256" in found["message"]
 
 
 def test_a_receipt_whose_request_is_not_its_sources_fails_agent_read(offline) -> None:
@@ -184,36 +246,70 @@ def test_a_rehashed_forecast_receipt_is_called_altered_without_run_again(offline
     rehash(run, "2026-10-17", lambda receipt: receipt["cities"][0]["temperature_2m"].__setitem__(3, receipt["cities"][0]["temperature_2m"][3] + 3.0))
     found = run.verdict()
     assert failed(found) == ["agent-data"], found["message"]
-    assert "a run's data never changes, so the receipt was altered after get_daily" in found["message"]
+    assert "a forecast run's data never changes, so the receipt was altered after get_daily" in found["message"]
     assert found["details"]["rerun"] is False and "upstream" not in found["message"]
 
 
-def test_an_archive_receipt_claiming_a_fetch_before_the_answer_key_is_called_altered(offline) -> None:
-    run = Run(task_for("2026-07-07"), offline, clock=T0)
+@pytest.mark.parametrize(("date", "label"), [("2000-02-29", "ERA5 reanalysis"), ("2026-09-06", "ECMWF IFS archive"), ("2026-10-14", "ECMWF IFS archive")])
+def test_a_rehashed_archive_receipt_is_called_altered_without_run_again(offline, date: str, label: str) -> None:
+    """WA-04: an archived day is final (ERA5 to 2017-01-01, the IFS archive to T-2: 2026-10-14 is T-2 here), so
+    a receipt whose consistent readings differ from the pin's was altered, exactly as with a forecast run."""
+    run = Run(task_for(date), offline, clock=T0)
+    run.gold()
+    rehash(run, date, lambda receipt: receipt["cities"][0]["temperature_2m"].__setitem__(3, 9.0))
+    found = run.verdict()
+    assert failed(found) == ["agent-data"], found["message"]
+    assert label in found["message"] and "an archived day is final (ERA5 to 2017-01-01, the IFS archive to T-2), so the receipt was altered after get_daily" in found["message"]
+    assert found["details"]["rerun"] is False and "run again" not in found["message"] and "upstream" not in found["message"]
+
+
+def test_an_outlook_receipt_claiming_a_fetch_before_the_answer_key_is_called_altered(offline) -> None:
+    """The outlook alone can change upstream, but only after the answer key's fetch: a receipt that differs
+    and says it was fetched first (at 03:55, after its own clock but before the pin's 04:00) was altered."""
+    run = Run(task_for("2026-10-30"), offline, clock=T0)
     run.gold()
     def change(receipt):
-        receipt["cities"][0]["temperature_2m"][3] = 9.0
-        receipt["fetched_at"] = "2000-01-01T00:00:00Z"
-    rehash(run, "2026-07-07", change)
+        receipt["cities"][0]["temperature_2m"][1] = 9.0
+        receipt["fetched_at"] = "2026-10-16T03:55:00Z"
+    rehash(run, "2026-10-30", change)
     found = run.verdict()
     assert failed(found) == ["agent-data"] and "fetched before the answer key did: the receipt was altered" in found["message"]
     assert found["details"]["rerun"] is False
 
 
-def test_data_that_changed_upstream_between_the_fetches_fails_agent_data_with_run_again(offline) -> None:
-    task = task_for("2026-07-07")
+def test_an_outlook_that_changed_upstream_between_the_fetches_fails_agent_data_with_run_again(offline) -> None:
+    """WA-04: the seasonal outlook is the one source Open-Meteo may update between two fetches minutes apart."""
+    task = task_for("2026-10-30")
     url = recorded_url(offline, task)
     body = recorded(url)["body"]
     changed = copy.deepcopy(body)
-    changed[0]["hourly"]["temperature_2m"][30] += 0.5
+    readings = changed[0]["hourly"]["temperature_2m"]
+    readings[5] = round(readings[5] + 0.5, 1)  # 2026-10-30T06:00Z, inside Athens's local day
     offline.overrides[url] = Turns(body, changed)  # the answer key sees one version, the agent the next
     run = Run(task, offline, clock=T0)
     run.gold()
     found = run.verdict()
     assert failed(found) == ["agent-data"], found["message"]
-    assert "can be updated upstream between two fetches: run again" in found["message"] and "Athens temperature_2m" in found["message"]
+    assert "ECMWF SEAS5 seasonal outlook (ensemble mean), 6-hourly can be updated upstream between two fetches: run again" in found["message"]
+    assert "Athens temperature_2m at 2026-10-30T06:00Z" in found["message"]
     assert found["details"]["rerun"] is True and found["score"] == 0.0
     assert found["details"]["agent_data_check"] == "against the data the agent read, the report is exact"
+
+
+def test_an_archive_that_differs_between_the_fetches_is_called_altered(offline) -> None:
+    """WA-04: the same upstream difference on an archived day (the IFS archive, final to T-2) is not run again."""
+    task = task_for("2026-07-07")
+    url = recorded_url(offline, task)
+    body = recorded(url)["body"]
+    changed = copy.deepcopy(body)
+    readings = changed[0]["hourly"]["temperature_2m"]
+    readings[30] = round(readings[30] + 0.5, 1)
+    offline.overrides[url] = Turns(body, changed)
+    run = Run(task, offline, clock=T0)
+    run.gold()
+    found = run.verdict()
+    assert failed(found) == ["agent-data"] and "an archived day is final" in found["message"]
+    assert found["details"]["rerun"] is False
 
 
 def recorded_url(fake, task: dict) -> str:
@@ -484,6 +580,40 @@ def test_the_date_check_names_each_kind_of_data(offline, date: str, kind: str | 
     if kind is None:
         assert "cannot be judged" in answer.message
         assert ("2027-04-30" if date > "2027" else "before 1940-01-01") in answer.source
+
+
+@pytest.mark.parametrize("minute", [0, 5, 9, 10])
+def test_the_date_check_verdict_holds_the_answer_to_the_ten_minute_rule(offline, minute: int) -> None:
+    """R2-04: from 00:00 to 00:10 UTC on the 7th, check_date refuses the new outlook month, as a daily-alert
+    task's answer key does; its verdict recomputes that, so the old answer (outlook) now fails "kind"."""
+    offline.clock = lambda: datetime.fromisoformat(f"2026-10-07T00:{minute:02d}:30+00:00")
+    given = build_output({"date": "2027-04-15"}, DateInput)
+    answer = alerts.check_date(given, Path("."))
+    assert verifier.verify_task("check-date", given, answer, None, ".")["valid"]
+    assert (answer.kind is None) == (minute < 10)
+    if minute < 10:
+        old = {
+            **plain_output(answer),
+            "kind": "outlook",
+            "source": "ECMWF SEAS5 seasonal outlook (ensemble mean), 6-hourly",
+            "message": "Today is 2026-10-07 (UTC). 2027-04-15 is a Thursday; a daily-alert task on it uses the ECMWF SEAS5 seasonal outlook (ensemble mean), 6-hourly.",
+        }
+        found = verifier.verify_task("check-date", given, build_output(old, DateOutput), None, ".")
+        assert not found["valid"] and [entry["id"] for entry in found["details"]["constraints"] if entry["ok"] is False] == ["kind", "message"]
+
+
+def test_an_answer_key_pinned_inside_the_ten_minute_window_fails_answer_key_rules(offline) -> None:
+    """R2-04: a pin whose clock falls before 00:10 on the 7th for a date in the new outlook month cannot come
+    from pin_alerts (it refuses); one forged from a later pin by moving its clock fails answer-key-rules."""
+    task = task_for("2027-04-15")
+    run = Run(task, offline, clock=datetime.fromisoformat("2026-10-07T00:11:00+00:00"))
+    run.gold()
+    assert run.verdict()["valid"]
+    pin = pinned(run)
+    pin["clock"] = pin["candidates"][0]["clock"] = "2026-10-07T00:05"
+    found = verdict_with_pin(run, pin)
+    assert failed(found)[0] == "answer-key-rules"
+    assert "a task on it works from 2026-10-07T00:10 UTC" in found["message"]
 
 
 # ----- The challenger's findings, each pinned by a test -----

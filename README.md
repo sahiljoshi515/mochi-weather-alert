@@ -30,7 +30,7 @@ fails the run.
 | Task | Does | Runner |
 |---|---|---|
 | `daily-alert` | Finds every city whose local day on the date crossed the thresholds and submits each one's values in the requested units, with the data they come from | `agent`, with `get_daily` and `report_alerts`; reference `pin_alerts` |
-| `check-date` | Tells today's UTC date and which data a date would use. The chat model is never told the date, so it calls this first when a person names a day relative to today ("tomorrow") | `tool` (`check_date`) |
+| `check-date` | Tells today's UTC date and which data a date would use, refusing a date exactly when a daily-alert task on it would be refused (the 10-minute rule below included). The chat model is never told the date, so it calls this first when a person names a day relative to today ("tomorrow") | `tool` (`check_date`) |
 
 The tools give the data, and the agent does the judging:
 - compare each value with its threshold exactly;
@@ -82,27 +82,48 @@ How the answer key and the agent are kept on the same data:
 
 - **Clocks.** They run in separate processes, seconds to minutes apart. The
   answer key applies the rules at two clock readings, now and 10 minutes
-  earlier, and accepts a date only when both allow it (a date that came into
-  range in the last 10 minutes is refused with the time to run again). The
-  agent's tools use their own clock minus 10 minutes, which falls between the
-  two as long as the agent reads within 10 minutes. The agent's tools fetch
-  once per date per run.
+  earlier, and accepts a date only when both allow it. The allowed range only
+  grows (the outlook reaches a month further on the 7th), so a date that came
+  into range in the last 10 minutes is refused with the first time a task on
+  it works: from 00:00 to 00:10 UTC on the 7th, a date in the new month is
+  refused "from 00:10 UTC". `check-date` answers the same. The agent's tools
+  use their own clock minus 10 minutes, which falls between the two as long as
+  the agent reads within 10 minutes. The agent's tools fetch once per date per
+  run.
 - **Runs.** Each task call's agent is one run with its own folder,
-  `reports/<run>/`, holding its receipt, its report and its call log. Two task
-  calls at once in one workspace (a chat can make them) never touch each
-  other's files, and the submitted report names its run. The answer key
-  records the runs already in the workspace, so a report left by an earlier
-  task never passes for this one.
+  `reports/<run>/`, holding its marker (`run.json`: the run's token and the
+  UTC second its first tool call made the folder), its receipt, its report and
+  its call log. Two task calls at once in one workspace (a chat can make them)
+  never touch each other's files, and the submitted report names its run. A
+  report left by an earlier task never passes for this one: the answer key
+  records the runs already in the workspace, and the run's marker must not be
+  older than the answer key's last fetch, to the second. The host starts the
+  agent only after the answer key returns, so this task's run is never older,
+  and the check holds however the host stages the answer key's scratch folder
+  (the command line gives it only the inputs).
+- **Writes.** Every file is written to a temporary file in the launch's own
+  `TMPDIR` and renamed into place, so a reader never sees half a file and the
+  workspace never holds a temporary file. The web host stages a second task
+  call by copying the workspace, and a temporary file that vanished during the
+  copy would fail it. Old run folders are likewise renamed out before they are
+  removed. Where `TMPDIR` is on another volume (bwrap's `/tmp` is a tmpfs), the
+  temporary file goes beside the target and that window remains; the call log
+  then notes `temp_beside`.
 - **Receipt.** `get_daily` records what it read in a receipt: the source, the
-  clock, the request, every reading, and a sha256 of the data's canonical
-  form. The verifier requires the receipt's request to be the one the rules
-  derive for its source and its readings to match its own sha256 (else "the
-  receipt was altered after get_daily"), its source to be a pinned one, and its
-  sha256 to equal the pin's.
-- **Upstream changes.** A forecast run never changes, so a receipt that differs
-  from the pinned run was altered. If the archive or the outlook changed between
-  the two fetches, the verdict is invalid, says "run again" and sets
-  `details.rerun`, as every "run again" verdict does.
+  clock, when Open-Meteo answered, the request, every reading, and a sha256 of
+  the data's canonical form. The verifier checks every field's type and range
+  before any arithmetic and requires the receipt's request to be the one the
+  rules derive for its source and its readings to match its own sha256 (else
+  "the receipt reports/<run>/<date>.source.json was altered after get_daily",
+  naming the field), its source to be a pinned one, and its sha256 to equal
+  the pin's. A malformed marker, receipt or report gets a verdict naming the
+  file and the field, never a verifier error.
+- **Upstream changes.** A forecast run never changes, and an archived day is
+  final (ERA5 to 2017-01-01, the IFS archive to T−2), so a receipt whose data
+  differs from the pinned data of the same source was altered: invalid, and no
+  rerun. Only the seasonal outlook can be updated between the two fetches:
+  then the verdict is invalid, says "run again" and sets `details.rerun`, as
+  every "run again" verdict does.
 - **Clock skew.** A clock more than 5 minutes off Open-Meteo's is refused,
   because it would put a date in the wrong kind of data.
 
@@ -122,10 +143,10 @@ plain `message` when it fails. A constraint whose prerequisite failed reads
 | 2 | `task-input` | The date is a calendar day from 1940-01-01, with 1 to 6 distinct well-formed conditions |
 | 3 | `answer-key-data` | Each pinned source is well formed: every city's local day (it starts and ends at a local midnight, or up to two hours after one when clocks jump, 20 to 28 hours apart, at offsets near its solar time), sorted on-grid stamps, plausible readings, its sha256, and its own alerts re-derived from its readings |
 | 4 | `answer-key-rules` | Each pinned source is the one the date rules choose at its clock reading, including any skipped runs |
-| 5 | `this-run` | The submitted report names a run of this task: its folder exists, and it was not in the workspace when the answer key was pinned |
+| 5 | `this-run` | The submitted report names a run of this task: its folder and marker exist, it was not in the workspace when the answer key was pinned, and its marker's time is not before the answer key's last fetch |
 | 6 | `agent-read` | `get_daily` wrote that run's receipt for the date, with the request the rules derive and readings matching its own hash |
 | 7 | `agent-source` | The source the agent read is one the answer key pinned |
-| 8 | `agent-data` | The agent's data is the pinned data, reading for reading (sha256) |
+| 8 | `agent-data` | The agent's data is the pinned data, reading for reading (sha256); a difference is "run again" only for the seasonal outlook |
 | 9 | `report-saved` | `report_alerts` saved that run's report for this task, on that data |
 | 10 | `submitted-task` | The submitted report is for the task input |
 | 11 | `submitted-shape` | The submitted report is well formed |
@@ -146,7 +167,7 @@ How it is scored:
 - **Score 0** when any of constraints 1 to 13 fails, because those guard the data and the report's integrity.
 - **Otherwise** the score is the F1 of the reported alert and unavailable cities, scaled by the share of cities examined. So the score is 1.0 exactly when the verdict is valid.
 - **Messages** name the case and show a value as `get_daily` gives it beside its rounded report, e.g. "Missing alert Athens: Athens has max_temp 91.94 -> report 91.9; it meets max_temp > 91.93".
-- **Rounding** is symmetric (ties away from zero), so rounding `get_daily`'s value, truncated toward zero at 9 decimals, gives the same report as rounding the exact value, negatives included. With 9 decimals the truncation never changes a comparison with a threshold of at most 2 decimals either: the readings carry 1 decimal, so a converted value differs from such a threshold by 0 or by more than 10⁻⁹.
+- **Rounding** is symmetric (ties away from zero), so rounding `get_daily`'s value, truncated toward zero at 9 decimals, gives the same report as rounding the exact value, negatives included. With 9 decimals the truncation never changes a comparison with a threshold of at most 2 decimals either. That rests on a bound the verifier enforces: every reading has at most 2 decimals (Open-Meteo gives 1, 0 for humidity, and 2 for a forecast run's precipitation spread over its hours, such as 0.03 mm). So a converted value or a humidity mean differs from such a threshold by 0 or by at least 6×10⁻⁹ (km/h to mph is the closest case). Data with a reading of more decimals is refused, by the answer key or as an altered receipt.
 
 The verifier recomputes every alert from the pinned raw readings with exact
 `Decimal`/`Fraction` arithmetic and integer calendar arithmetic (a verifier may
@@ -169,7 +190,9 @@ Every tool call is checked too:
 - **Yesterday and today** come from the forecast runs issued before them. The archive becomes final at T−2.
 - **The 2017 seam.** ERA5 (to 2017-01-01) and the IFS archive (from 2017-01-02) can differ by a few degrees at the same place.
 - **"Today" is UTC.** In the evening in the Americas that is already tomorrow locally; `check-date` says which day it is.
-- **Run again.** A run fails, with "run again" and `details.rerun`, if the archive or outlook changes between the answer key's fetch and the agent's, if the agent reads more than 10 minutes after the answer key, or if a forecast run is published, or not yet complete for the agent, inside that window.
+- **Run again.** A run fails, with "run again" and `details.rerun`, if the seasonal outlook changes between the answer key's fetch and the agent's, if the agent reads more than 10 minutes after the answer key, or if a forecast run is published, or not yet complete for the agent, inside that window. Were Open-Meteo to revise an archived day within those minutes, the verdict would call the receipt altered: the archive is taken as final from T−2.
+- **Two identical task calls at once.** Each run is judged on its own files, but the verdict cannot tell which of two concurrent runs served which call: a call that submitted the other call's report, for the same task input, would pass. Doing so needs the other run's token, which no agent is shown (only a scripted or compromised agent could), and the report is right either way. A host-given task-call id would close it.
+- **Staging two calls at once.** The web host stages a task call by copying the workspace, and that copy fails if a file vanishes during it. This plugin never leaves a temporary file in the workspace on a host whose `TMPDIR` shares its volume (see Writes), but the host should tolerate vanishing files too.
 - **Free-tier limits.** Open-Meteo's free tier allows about 10,000 calls a day per address, and each city in a request counts as one. A run usually makes 60 (one source) or 90 (two). When forecast runs are not yet published, the answer key's two readings and the agent's read each try up to three runs: up to 9 requests, 270 calls. Each request is retried up to 3 times on 429 or 5xx, so 810 at worst. At 60 to 90 a run, that is about 110 to 160 runs a day.
 
 ## Layout
@@ -189,7 +212,8 @@ Every tool call is checked too:
 │                    #   (rules.py), Open-Meteo (openmeteo.py), the sources (sources.py), local days (days.py),
 │                    #   and tools_dev/ (fixtures, cases and the live date matrix)
 ├── tests/           # offline tests (recorded Open-Meteo answers in tests/fixtures/), an independent oracle,
-│                    #   and scripted cases under tests/cases/ for NanoAgent's task runner
+│                    #   a fuzz of a run's files (test_tamper.py), and scripted cases under tests/cases/ for
+│                    #   NanoAgent's task runner
 ├── ui/              # how the page draws the outputs: renderers.js and renderers.css
 ├── product/         # the product page a catalog shows: product.yaml and icon.svg
 └── verifier/        # deterministic verifier: one module per tool, the task's 21 constraints in task.py

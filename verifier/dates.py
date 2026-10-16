@@ -4,13 +4,13 @@ on a date would use, re-derived by hand from the clock reading the answer carrie
 from .checks import constraint, result
 from .rules import (
     DATE,
-    choose,
     date_problem,
     date_text,
     month_length,
     plain,
     source_label,
     stamp_minutes,
+    usable,
     weekday,
     windows_of,
 )
@@ -39,12 +39,13 @@ def verify_input(value):
 
 
 def expected_answer(asked, clock):
-    """What check_date answers for ``asked`` at ``clock`` (UTC minutes)."""
+    """What check_date answers for ``asked`` at ``clock`` (UTC minutes): a date the rules allow at the clock
+    but not 10 minutes before is refused, as a daily-alert task's answer key refuses it."""
     today = date_text(clock // 1440)
     date = today if asked.strip().lower() == "today" else asked
     problem = date_problem(date)
     calendar_day = problem is None or problem.startswith(f"{date} is before")
-    choice = None if problem else choose(date, clock)
+    choice = None if problem else usable(date, clock)
     if choice is not None and choice.problem:
         problem = choice.problem
     if problem:
@@ -106,7 +107,7 @@ REST = (
     ("today", "Today is the clock's UTC date"),
     ("date", "The date is the one asked about (today's for today), with its weekday"),
     ("ranges", "Each kind of data's date range follows the rules at the clock"),
-    ("kind", "The date's data follows the rules at the clock"),
+    ("kind", "The date's data follows the rules at the clock and 10 minutes before it"),
     ("message", "The answer says so in one sentence"),
 )
 FIELDS = {

@@ -27,15 +27,26 @@ def task_for(date: str, **changes) -> dict:
 class Run:
     """One run's pieces: the pin, the agent's workspace, its get_daily answer, and the verdict."""
 
-    def __init__(self, task: dict, fake, *, clock: datetime, agent_after: timedelta = timedelta(seconds=20), workspace: Path | None = None) -> None:
+    def __init__(
+        self,
+        task: dict,
+        fake,
+        *,
+        clock: datetime,
+        agent_after: timedelta = timedelta(seconds=20),
+        workspace: Path | None = None,
+        staging: str = "web",
+    ) -> None:
         self.task = task
         self.fake = fake
         self.workspace = workspace or Path(tempfile.mkdtemp(prefix="weather-run-"))
         fake.clock = lambda: clock
         sources.CACHE.clear()
-        # The answer key works in a copy of the workspace, as the site stages it.
+        # The answer key works in a scratch folder: a copy of the workspace, as the site stages it, or empty
+        # but for the task's inputs, as the command line stages it ("cli").
         scratch = Path(tempfile.mkdtemp(prefix="weather-ref-"))
-        shutil.copytree(self.workspace, scratch, dirs_exist_ok=True)
+        if staging == "web":
+            shutil.copytree(self.workspace, scratch, dirs_exist_ok=True)
         self.pin = alerts.pin_alerts(build_output(task, AlertInput), scratch)
         fake.clock = lambda: clock + agent_after
         self.daily = None

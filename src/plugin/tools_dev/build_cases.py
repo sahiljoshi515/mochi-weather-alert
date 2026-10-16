@@ -141,7 +141,7 @@ def cases() -> dict[str, dict]:
         "note": "The receipt of the data read is changed behind the tools' back.",
         "task": "daily-alert", "arguments": july,
         "steps": [read_step(july), judge_step(july), *report_steps(), {"python": "path = workspace / 'reports' / outputs['daily']['run'] / '2026-07-07.source.json'; receipt = json.loads(path.read_text()); receipt['cities'][0]['temperature_2m'][0] += 1; path.write_text(json.dumps(receipt))"}, SUBMIT_LAST],
-        "expect": {"valid": False, "score_max": 0.0, "message_contains": "the receipt was altered after get_daily: its readings no longer match its own sha256"},
+        "expect": {"valid": False, "score_max": 0.0, "message_contains": "was altered after get_daily: its readings no longer match its own sha256"},
     }  # fmt: skip
     found["earlier_run_in_folder"] = {
         "note": "An earlier task's complete run sits in the member's folder: this run works in its own folder and passes.",
@@ -186,11 +186,12 @@ EARLIER = "a1b2c3d4e5f60718"  # the earlier task's run token in folders/earlier_
 
 
 def earlier_run_tar(fake, clock) -> None:
-    """folders/earlier_run.tar: the reports/ folder an earlier, correct run of the gold task left, built
-    with the real tools from the recorded answers (its run token fixed)."""
+    """folders/earlier_run.tar: the reports/ folder an earlier, correct run of the gold task left an hour
+    before the clock, built with the real tools from the recorded answers (its run token fixed)."""
     import io
     import tarfile
     import tempfile
+    from datetime import timedelta
 
     from helpers import Run
 
@@ -199,10 +200,11 @@ def earlier_run_tar(fake, clock) -> None:
     real = alerts.RUN
     alerts.RUN = EARLIER
     try:
-        run = Run(task("2026-07-07"), fake, clock=clock)
+        run = Run(task("2026-07-07"), fake, clock=clock - timedelta(hours=1))
         run.gold()
     finally:
         alerts.RUN = real
+        fake.clock = lambda: clock
     folder = CASES / "folders"
     folder.mkdir(parents=True, exist_ok=True)
     buffer = io.BytesIO()

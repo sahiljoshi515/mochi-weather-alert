@@ -64,15 +64,17 @@ def test_a_date_past_the_outlook_is_refused(offline) -> None:
         sources.pin("2027-05-01")
 
 
-def test_a_date_that_came_into_range_minutes_ago_is_refused_with_when_to_run_again(offline) -> None:
+def test_a_date_that_came_into_range_minutes_ago_is_refused_until_the_first_time_that_works(offline) -> None:
     """WA-03: on the 7th the outlook gains a month at 00:00 UTC; for ten minutes the agent's tools (which
-    read the clock ten minutes behind) would refuse the new month, so the answer key refuses it first."""
-    offline.clock = lambda: at("2026-10-07T00:05:00+00:00")
-    with pytest.raises(ValueError, match=r"came into range only in the last 10 minutes .* run again after 2026-10-07T00:15 UTC"):
-        sources.pin("2027-04-15")
-    offline.clock = lambda: at("2026-10-07T00:11:00+00:00")
+    read the clock ten minutes behind) would refuse the new month, so the answer key refuses it first,
+    naming the earliest time a task on it works, 00:10 UTC, whenever in those ten minutes it is asked."""
+    for minute in (0, 5, 9):
+        offline.clock = lambda minute=minute: at(f"2026-10-07T00:{minute:02d}:30+00:00")
+        with pytest.raises(ValueError, match=r"came into range only in the last 10 minutes .*: a task on it works from 2026-10-07T00:10 UTC\.$"):
+            sources.pin("2027-04-15")
+    offline.clock = lambda: at("2026-10-07T00:10:00+00:00")
     _, found = sources.pin("2027-04-15")
-    assert len(found) == 1 and found[0].key[0] == "outlook"
+    assert len(found) == 1 and found[0].key[0] == "outlook", "from 00:10 the date works"
     sources.CACHE.clear()
     offline.clock = lambda: at("2026-10-07T00:12:00+00:00")
     assert sources.read("2027-04-15").key[0] == "outlook", "an agent reading after the answer key is never refused"

@@ -89,6 +89,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.0,
-  "message_contains": "the receipt was altered after get_daily: its readings no longer match its own sha256"
+  "message_contains": "was altered after get_daily: its readings no longer match its own sha256"
  }
 }

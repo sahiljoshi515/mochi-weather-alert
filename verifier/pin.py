@@ -16,7 +16,10 @@ from .rules import (
     source_problem,
     source_request,
     stamp_minutes,
+    stamp_seconds,
+    stamp_text,
     task_problem,
+    usable,
 )
 
 
@@ -37,6 +40,9 @@ def candidate_shape_problem(task, candidate):
         return "a pinned source's clock must be a UTC time"
     if source["today"] != date_text(clock // 1440):
         return f"a pinned source's today, {source['today']}, is not its clock's date"
+    fetched = stamp_seconds(candidate["fetched_at"])
+    if fetched is None or fetched < clock * 60:
+        return "a pinned source's fetched_at must be a UTC time YYYY-MM-DDTHH:MM:SSZ, at or after its clock"
     if not isinstance(candidate["sha256"], str) or not SHA256.fullmatch(candidate["sha256"]):
         return "a pinned source must carry the sha256 of its data"
     if candidate["request"] != source_request(task["date"], key_of(source)):
@@ -62,7 +68,8 @@ def candidate_rules_problem(task, candidate):
 def pin_problems(task, pin):
     """(what is wrong with the pinned data's shape, what is wrong with its choice of data), each None
     when nothing is: one or two candidates with distinct sources, read at the pin's clock and
-    DELTA_MINUTES before it, each well formed and the data the rules choose at its reading."""
+    DELTA_MINUTES before it, each well formed and the data the rules choose at its reading, for a date
+    the rules allow at both readings."""
     if pin.date != task["date"]:
         return "the answer key is for another date", None
     clock = stamp_minutes(pin.clock)
@@ -82,6 +89,9 @@ def pin_problems(task, pin):
         problem = candidate_shape_problem(task, candidate)
         if problem:
             return problem, None
+    refused = usable(task["date"], clock).problem
+    if refused:
+        return None, f"at {stamp_text(clock)}Z a task on {task['date']} is refused: {refused}"
     for candidate in candidates:
         problem = candidate_rules_problem(task, candidate)
         if problem:

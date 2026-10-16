@@ -125,7 +125,7 @@ class Unavailable(Output):
 class PinnedSource(Output):
     source: DataSource
     clock: Annotated[str, "The clock reading the date rules were applied at, a UTC time YYYY-MM-DDTHH:MM"]
-    fetched_at: Annotated[str, "When Open-Meteo answered, UTC"]
+    fetched_at: Annotated[str, "When Open-Meteo answered, a UTC time YYYY-MM-DDTHH:MM:SSZ"]
     request: Annotated[str, "The request that fetched the data"]
     skipped: Annotated[list[str], "Newer forecast runs not (completely) published when fetched, newest first"]
     sha256: Annotated[str, "sha256 of the data's canonical form"]
@@ -211,8 +211,12 @@ class DateOutput(Output):
     clock: Annotated[str, "The clock reading, a UTC time YYYY-MM-DDTHH:MM"]
     date: Annotated[str, "The date asked about (today's when the input is today)"]
     weekday: Annotated[str, "The date's weekday"]
-    kind: Annotated[DataKind | None, "The data a daily-alert task on the date would use; null when the date is refused"]
-    source: Annotated[str, "That data in plain words, or why the date is refused"]
+    kind: Annotated[
+        DataKind | None,
+        "The data a daily-alert task on the date would use; null when such a task would be refused, as in the first 10 "
+        "minutes a date is in range",
+    ]
+    source: Annotated[str, "That data in plain words, or why the date is refused (with when it works, if it soon will)"]
     archive_first: Annotated[str, "The first date the archive covers"]
     archive_last: Annotated[str, "The last date the archive covers"]
     forecast_first: Annotated[str, "The first date a forecast run covers"]

@@ -6,9 +6,10 @@ scaled by the share of cities examined.
 
 Every file the verdict reads is the named run's own (reports/<run>/), so two task calls at once in one
 workspace are judged apart; the run must have begun after the answer key (it is not among the runs the
-answer key saw in the workspace), so a report left by an earlier task never passes for this one."""
+answer key saw in the workspace, and its marker's time is not before the answer key's last fetch), so a
+report left by an earlier task never passes for this one."""
 
-from .checks import compact, constraint, entries_of, plain_candidate, result, run_problem
+from .checks import compact, constraint, entries_of, plain_candidate, result, run_marker
 from .pin import pin_problems
 from .receipt import receipt_of
 from .report import compare, saved_report
@@ -32,7 +33,9 @@ from .rules import (
     parse_conditions,
     plain_source,
     plain_task,
+    seconds_text,
     stamp_minutes,
+    stamp_seconds,
     stamp_text,
     stamps_inside,
     task_problem,
@@ -65,7 +68,11 @@ TEXT = {
 ORDER = tuple(TEXT)
 GATES = ORDER[:13]  # the data and the report's integrity: any failure scores 0
 MOST_NAMED = 3  # cities a failure message names
-CHANGING = (DataKind.ARCHIVE.value, DataKind.OUTLOOK.value)  # sources Open-Meteo may update; a forecast run never changes
+# Why a source's data cannot change between two fetches minutes apart; the seasonal outlook alone can.
+FINAL = {
+    DataKind.FORECAST.value: "a forecast run's data never changes",
+    DataKind.ARCHIVE.value: "an archived day is final (ERA5 to 2017-01-01, the IFS archive to T-2)",
+}
 
 
 def first_gap(series, variable, step_hours):
@@ -185,16 +192,18 @@ def source_mismatch(receipt, candidates, pinned_at):
 
 
 def data_mismatch(match, receipt):
-    """(why the agent's data differs from the pinned data of the same source, whether to run again)."""
+    """(why the agent's data differs from the pinned data of the same source, whether to run again). Only
+    the seasonal outlook can be updated upstream between the two fetches; any other difference, or one in
+    a receipt that says it was fetched before the answer key's, means the receipt was altered."""
     difference = first_difference(match, receipt)
-    kind = receipt["source"]["kind"]
-    if kind not in CHANGING:
+    source = receipt["source"]
+    if source["kind"] in FINAL:
         message = (
-            f"The receipt's data differs from the pinned data of the same forecast run ({difference}); a run's data "
-            "never changes, so the receipt was altered after get_daily."
+            f"The receipt's data differs from the pinned data of the same source, the {source['label']} "
+            f"({difference}); {FINAL[source['kind']]}, so the receipt was altered after get_daily."
         )
         return message, False
-    if receipt["fetched_at"] < match["fetched_at"]:
+    if stamp_seconds(receipt["fetched_at"]) < stamp_seconds(match["fetched_at"]):
         message = (
             f"The receipt's data differs from the pinned data ({difference}), and it says the agent fetched before the "
             "answer key did: the receipt was altered after get_daily."
@@ -205,6 +214,17 @@ def data_mismatch(match, receipt):
         f"{receipt['source']['label']} can be updated upstream between two fetches: run again."
     )
     return message, True
+
+
+def pinned_second(reference):
+    """When the answer key finished pinning, in UTC seconds: its sources' last fetched_at (its clock's minute
+    when none reads as a time), or None. The host starts the task's agent only after the answer key returns,
+    so the run of this task made its folder no earlier."""
+    fetched = [second for second in (stamp_seconds(candidate.fetched_at) for candidate in reference.candidates) if second is not None]
+    clock = stamp_minutes(reference.clock)
+    if fetched:
+        return max(fetched)
+    return None if clock is None else clock * 60
 
 
 def source_fields(named_data, read):
@@ -246,9 +266,16 @@ def verify_task(arguments, output, reference, workspace):
 
     # 5-8: the run the submission names, and the data its agent read.
     run = output.run
-    problem = run_problem(workspace, run)
-    if problem is None and reference is not None and run in reference.prior_runs:
-        problem = f"run {run} began before this task (it was in the workspace when the answer key was pinned): submit the report this task's report_alerts returned"
+    marker, problem = run_marker(workspace, run)
+    if problem is None and reference is not None:
+        pinned = pinned_second(reference)
+        if run in reference.prior_runs:
+            problem = f"run {run} began before this task (it was in the workspace when the answer key was pinned): submit the report this task's report_alerts returned"
+        elif pinned is not None and stamp_seconds(marker["started"]) < pinned:
+            problem = (
+                f"run {run} began before this task (at {marker['started']}, before the answer key finished pinning the "
+                f"data at {seconds_text(pinned)}): submit the report this task's report_alerts returned"
+            )
     put("this-run", problem is None, None, run, problem)
     receipt = None
     if holds_("this-run", "task-input"):

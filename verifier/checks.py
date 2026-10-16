@@ -4,10 +4,14 @@ forms of the contract instances the rules work on. Pure functions of their argum
 import json
 from pathlib import Path
 
-from .rules import RUN_TOKEN, SOURCE_VARIABLES, plain_source, run_folder
+from .rules import RUN_TOKEN, SOURCE_VARIABLES, plain_source, run_folder, shown, stamp_seconds
 
 RUN_MARKER = "run.json"
 MOST = 10  # list entries a constraint's expected or actual shows
+MAX_FILE_BYTES = 4_000_000  # far above any file a run writes (a receipt is about 40 KB)
+# What reading a file the agent's folder holds could raise if a check let an odd value through: a last
+# resort that turns it into a verdict naming the file (every field is checked before it is used).
+UNREADABLE = (ArithmeticError, LookupError, TypeError, ValueError, RecursionError)
 
 
 def result(valid, message, *, score=None, **details):
@@ -45,21 +49,35 @@ def read_json(path):
     path = Path(path)
     if not path.is_file():
         return None, "missing"
+    if path.stat().st_size > MAX_FILE_BYTES:
+        return None, "too large"
     try:
         return json.loads(path.read_text(encoding="utf-8")), None
-    except ValueError:
+    except (ValueError, RecursionError):
         return None, "not JSON"
 
 
-def run_problem(workspace, run):
-    """What is wrong with ``run`` as a run of this workspace, or None: its token's form (checked before
-    it names any path) and its folder's marker."""
+def run_marker(workspace, run):
+    """(run ``run``'s marker {run, started}, None) or (None, what is wrong): the token's form (checked before
+    it names any path), and its folder's marker naming it, with the UTC second the run made its folder."""
     if not isinstance(run, str) or not RUN_TOKEN.fullmatch(run):
-        return f"{run!r} is not a run token (16 hex digits): submit the report report_alerts returned"
-    found, problem = read_json(Path(workspace) / run_folder(run) / RUN_MARKER)
-    if problem or not isinstance(found, dict) or found.get("run") != run:
-        return f"this workspace has no run {run}: submit the report report_alerts returned"
-    return None
+        return None, f"{shown(run)} is not a run token (16 hex digits): submit the report report_alerts returned"
+    where = f"{run_folder(run)}/{RUN_MARKER}"
+    found, problem = read_json(Path(workspace) / where)
+    if problem == "missing":
+        return None, f"this workspace has no run {run}: submit the report report_alerts returned"
+    if problem:
+        return None, f"{where} is not a run marker: {problem}"
+    if not isinstance(found, dict) or set(found) != {"run", "started"} or found["run"] != run:
+        return None, f"{where} is not the marker of run {run}: it must hold run and started"
+    if stamp_seconds(found["started"]) is None:
+        return None, f"{where}: started must be a UTC time YYYY-MM-DDTHH:MM:SSZ, not {shown(found['started'])}"
+    return found, None
+
+
+def run_problem(workspace, run):
+    """What is wrong with ``run`` as a run of this workspace, or None (see run_marker)."""
+    return run_marker(workspace, run)[1]
 
 
 def plain_city(city):

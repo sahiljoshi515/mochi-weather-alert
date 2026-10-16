@@ -4,7 +4,7 @@ judgement with the expected alerts that the task's verdict scores."""
 from decimal import Decimal
 from pathlib import Path
 
-from .checks import entries_by_city, entries_of, read_json, result, run_problem
+from .checks import UNREADABLE, entries_by_city, entries_of, read_json, result, run_problem
 from .daily import cities_problem
 from .receipt import receipt_of
 from .rules import (
@@ -22,11 +22,19 @@ from .rules import (
 
 
 def saved_report(workspace, date, run):
-    """(run ``run``'s report file for ``date`` as JSON, None) or (None, why it is not one)."""
+    """(run ``run``'s report file for ``date`` as JSON, None) or (None, why it is not one, naming the file
+    and the field)."""
     problem = run_problem(workspace, run)
     if problem:
         return None, problem
     where = report_path(date, run)
+    try:
+        return checked_report(workspace, date, run, where)
+    except UNREADABLE as error:  # a last resort: every field is checked before it is used
+        return None, f"{where} is not a report report_alerts wrote: it cannot be read ({str(error)[:80]})"
+
+
+def checked_report(workspace, date, run, where):
     found, problem = read_json(Path(workspace) / where)
     if problem == "missing":
         return None, f"no report at {where}: call report_alerts for every city before submitting"
