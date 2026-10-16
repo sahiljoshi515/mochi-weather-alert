@@ -71,10 +71,13 @@ RUN_MARKER = "run.json"
 # Every tool call of the run, one JSON line each, kept short: what a run did when its agent went wrong.
 CALL_LOG = "calls.log"
 CALL_LOG_LINES = 300
-# Run folders kept, this run's included: older ones are pruned, but never one under an hour old (it
-# may still be running).
-KEEP_RUNS = 30
-PRUNE_AFTER_SECONDS = 3600
+# Pruning keeps the member's folder from growing with every run (the site stops saving it back past 5,000
+# entries). Removing a folder can collide with a concurrent task call's staging copy on the host, so it is
+# rare: only once more than PRUNE_ABOVE_RUNS run folders exist, only folders older than PRUNE_AFTER_SECONDS
+# (all of them at once, so the next pruning is about PRUNE_ABOVE_RUNS runs away), at most once per process.
+PRUNE_ABOVE_RUNS = 200
+PRUNE_AFTER_SECONDS = 24 * 3600
+PRUNED = {"done": False}
 # This plugin process's run: its folder's name, carried by every receipt and report it writes and by
 # the submitted report, so the verifier judges exactly this run's files.
 RUN = secrets.token_hex(8)
@@ -201,23 +204,26 @@ def remove_folder(folder: Path) -> None:
 
 
 def prune(workspace: Path) -> None:
-    """Remove the oldest run folders past KEEP_RUNS, never one younger than PRUNE_AFTER_SECONDS: the member's
-    folder would otherwise grow with every run (the site stops saving it back past 5,000 entries)."""
-    base = workspace.resolve() / REPORT_DIR
-    others = [base / run for run in runs_in(workspace) if run != RUN]
-    if len(others) < KEEP_RUNS:
+    """When more than PRUNE_ABOVE_RUNS run folders exist, remove every other run's folder older than
+    PRUNE_AFTER_SECONDS. Checked at most once per process."""
+    if PRUNED["done"]:
         return
-    others.sort(key=started_of)
+    PRUNED["done"] = True
+    runs = runs_in(workspace)
+    if len(runs) <= PRUNE_ABOVE_RUNS:
+        return
+    base = workspace.resolve() / REPORT_DIR
     now = sources.now().timestamp()
-    for folder in others[: len(others) - KEEP_RUNS + 1]:
-        if now - started_of(folder) > PRUNE_AFTER_SECONDS:
-            remove_folder(folder)
+    for run in runs:
+        if run != RUN and now - started_of(base / run) > PRUNE_AFTER_SECONDS:
+            remove_folder(base / run)
 
 
 def ensure_run_folder(workspace: Path) -> Path:
     """This run's folder, reports/<run>/, made on first use with its marker: the run's token and when it
-    began, by the clock the answer key reads (pruning old runs then). The run's first tool call makes it, after
-    the answer key has pinned the data, so the verifier holds the run to have begun no earlier."""
+    began, by the clock the answer key reads (pruning old runs then, rarely: see prune). The run's first tool
+    call makes it, after the answer key has pinned the data, so the verifier holds the run to have begun no
+    earlier."""
     folder = workspace.resolve() / run_folder(RUN)
     if not (folder / RUN_MARKER).is_file():
         folder.mkdir(parents=True, exist_ok=True)

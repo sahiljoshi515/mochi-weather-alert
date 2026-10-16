@@ -85,24 +85,43 @@ def stamp(seconds: float) -> str:
     return datetime.fromtimestamp(seconds, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def test_old_run_folders_are_pruned_but_never_young_ones(offline, monkeypatch) -> None:
-    workspace = Path(tempfile.mkdtemp())
-    old = T0.timestamp() - 7200  # the markers and the pruning read the plugin's clock: frozen at T0 here
-    for index in range(40):
-        folder = workspace / "reports" / f"{index:016x}"
+def run_folders(workspace: Path, ages: dict[str, float]) -> None:
+    """Run folders with markers, each begun ``ages[token]`` hours before T0 (the plugin's clock here)."""
+    for token, hours in ages.items():
+        folder = workspace / "reports" / token
         folder.mkdir(parents=True)
-        (folder / "run.json").write_text(json.dumps({"run": folder.name, "started": stamp(old + index)}))
-    young = workspace / "reports" / "ffffffffffffffff"
-    young.mkdir()
-    (young / "run.json").write_text(json.dumps({"run": young.name, "started": stamp(T0.timestamp())}))
+        (folder / "run.json").write_text(json.dumps({"run": token, "started": stamp(T0.timestamp() - hours * 3600)}))
+
+
+def test_past_200_run_folders_every_one_over_a_day_old_is_pruned_and_no_younger_one(offline, monkeypatch) -> None:
+    """Pruning is rare, because removing a folder can collide with a concurrent call's staging copy on the host:
+    only past 200 run folders, only folders over 24 hours old (all at once), each renamed out of the workspace
+    before it is deleted, at most once per process."""
+    monkeypatch.setattr(alerts, "PRUNED", {"done": False})
+    workspace = Path(tempfile.mkdtemp())
+    old = {f"{index:016x}": 25 + index / 100 for index in range(190)}
+    young = {f"{index:016x}": hours for index, hours in zip(range(190, 200), (23.9, 20, 12, 6, 3, 1, 0.5, 0.1, 0.01, 0), strict=True)}
+    run_folders(workspace, {**old, **young})
     held = set(Path(tempfile.gettempdir()).glob("weather-alert-pruned-*"))
     monkeypatch.setattr(alerts, "RUN", "eeeeeeeeeeeeeeee")
-    alerts.ensure_run_folder(workspace)
+    alerts.ensure_run_folder(workspace)  # 201 run folders with this run's
     left = sorted(path.name for path in (workspace / "reports").iterdir())
-    assert "ffffffffffffffff" in left and "eeeeeeeeeeeeeeee" in left
-    assert len(left) == 30, "30 run folders in all: this run and the 29 newest others"
-    assert f"{0:016x}" not in left and f"{39:016x}" in left
+    assert left == sorted([*young, "eeeeeeeeeeeeeeee"]), "every folder over 24 h old goes; every younger one stays"
     assert set(Path(tempfile.gettempdir()).glob("weather-alert-pruned-*")) == held, "pruned folders leave nothing behind"
+    other = Path(tempfile.mkdtemp())
+    run_folders(other, {f"{index:016x}": 48 for index in range(210)})
+    monkeypatch.setattr(alerts, "RUN", "dddddddddddddddd")
+    alerts.ensure_run_folder(other)
+    assert len(list((other / "reports").iterdir())) == 211, "at most once per process"
+
+
+def test_no_pruning_up_to_200_run_folders(offline, monkeypatch) -> None:
+    monkeypatch.setattr(alerts, "PRUNED", {"done": False})
+    workspace = Path(tempfile.mkdtemp())
+    run_folders(workspace, {f"{index:016x}": 48 for index in range(199)})
+    monkeypatch.setattr(alerts, "RUN", "eeeeeeeeeeeeeeee")
+    alerts.ensure_run_folder(workspace)  # 200 run folders with this run's
+    assert len(list((workspace / "reports").iterdir())) == 200
 
 
 def test_a_run_folder_marker_names_the_run_and_when_its_first_call_made_it(offline) -> None:

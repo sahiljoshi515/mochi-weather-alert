@@ -102,13 +102,12 @@ How the answer key and the agent are kept on the same data:
   and the check holds however the host stages the answer key's scratch folder
   (the command line gives it only the inputs).
 - **Writes.** Every file is written to a temporary file in the launch's own
-  `TMPDIR` and renamed into place, so a reader never sees half a file and the
-  workspace never holds a temporary file. The web host stages a second task
-  call by copying the workspace, and a temporary file that vanished during the
-  copy would fail it. Old run folders are likewise renamed out before they are
-  removed. Where `TMPDIR` is on another volume (bwrap's `/tmp` is a tmpfs), the
-  temporary file goes beside the target and that window remains; the call log
-  then notes `temp_beside`.
+  `TMPDIR` and renamed into place, so a reader never sees half a file. Where
+  `TMPDIR` shares the workspace's volume, the workspace never holds a
+  temporary file, which matters because the web host stages a second task call
+  by copying the workspace. Where it does not (bwrap's `/tmp` is a tmpfs), the
+  temporary file goes beside its target and the call log notes `temp_beside`.
+  Removing old run folders still makes files vanish: see Limitations.
 - **Receipt.** `get_daily` records what it read in a receipt: the source, the
   clock, when Open-Meteo answered, the request, every reading, and a sha256 of
   the data's canonical form. The verifier checks every field's type and range
@@ -192,7 +191,7 @@ Every tool call is checked too:
 - **"Today" is UTC.** In the evening in the Americas that is already tomorrow locally; `check-date` says which day it is.
 - **Run again.** A run fails, with "run again" and `details.rerun`, if the seasonal outlook changes between the answer key's fetch and the agent's, if the agent reads more than 10 minutes after the answer key, or if a forecast run is published, or not yet complete for the agent, inside that window. Were Open-Meteo to revise an archived day within those minutes, the verdict would call the receipt altered: the archive is taken as final from T−2.
 - **Two identical task calls at once.** Each run is judged on its own files, but the verdict cannot tell which of two concurrent runs served which call: a call that submitted the other call's report, for the same task input, would pass. Doing so needs the other run's token, which no agent is shown (only a scripted or compromised agent could), and the report is right either way. A host-given task-call id would close it.
-- **Staging two calls at once.** The web host stages a task call by copying the workspace, and that copy fails if a file vanishes during it. This plugin never leaves a temporary file in the workspace on a host whose `TMPDIR` shares its volume (see Writes), but the host should tolerate vanishing files too.
+- **Pruning can fail a concurrent call.** NanoAgent's web host stages a task call by copying the whole workspace, and the copy fails if a file vanishes during it, failing that call before it starts. Pruning removes old run folders, so it can still collide with another call's staging copy. It is kept rare: only when more than 200 run folders exist, only folders over 24 hours old (all of them at once), at most once per process, each renamed out of the workspace before it is deleted. Where `TMPDIR` is on another volume, a temporary file beside its target can collide the same way. Only the host can close this, by tolerating files that vanish during its copy.
 - **Free-tier limits.** Open-Meteo's free tier allows about 10,000 calls a day per address, and each city in a request counts as one. A run usually makes 60 (one source) or 90 (two). When forecast runs are not yet published, the answer key's two readings and the agent's read each try up to three runs: up to 9 requests, 270 calls. Each request is retried up to 3 times on 429 or 5xx, so 810 at worst. At 60 to 90 a run, that is about 110 to 160 runs a day.
 
 ## Layout
@@ -232,8 +231,8 @@ NanoAgent passes the folder the plugin may write to as `NANOAGENT_WORKSPACE`.
 Each run writes its own folder, `reports/<run>/`: the report
 (`<date>.json`), the receipt (`<date>.source.json`) and one short line per
 tool call (`calls.log`), so a run that went wrong can be read back from the
-member's folder. Past 30 runs, the oldest folders over an hour old are
-pruned.
+member's folder. Once more than 200 run folders exist, the next run removes
+every run folder over 24 hours old (see Limitations).
 
 ### Reproduce the checks without a model
 
