@@ -30,8 +30,13 @@ def compact(value):
 
 def constraint(identifier, text, ok, expected=None, actual=None, message=None):
     """One constraint's entry: ok is True (holds), False (fails) or None (not checked: an earlier one it
-    depends on failed). A failed one says why in plain words."""
-    entry = {"id": identifier, "constraint": text, "ok": ok, "expected": compact(expected), "actual": compact(actual)}
+    depends on failed), with what was expected and found when they say something. A failed one says
+    why in plain words."""
+    entry = {"id": identifier, "constraint": text, "ok": ok}
+    if expected is not None:
+        entry["expected"] = compact(expected)
+    if actual is not None:
+        entry["actual"] = compact(actual)
     if ok is False and message:
         entry["message"] = message
     return entry

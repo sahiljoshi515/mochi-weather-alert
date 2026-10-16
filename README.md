@@ -101,8 +101,9 @@ Weather data by [Open-Meteo.com](https://open-meteo.com), CC BY 4.0.
 
 `verifier/task.py` judges the submitted report against 21 constraints, in
 order. Each appears in the verdict's `details.constraints` as `{id,
-constraint, ok, expected, actual}`, with a plain message when it fails. A
-constraint whose prerequisite failed reads `ok: null` ("not checked").
+constraint, ok}`, with `expected` and `actual` where they say something and a
+plain `message` when it fails. A constraint whose prerequisite failed reads
+`ok: null` ("not checked").
 
 | # | id | Holds when |
 |---|---|---|
