@@ -81,6 +81,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "Perth humidity 83.25 -> 83.3 (1 decimal, ties away from zero), reported 83.2"
+  "message_contains": "values-exact: Perth humidity is reported as 83.2, but get_daily gave 83.25, which is 83.3 to 1 decimal (ties away from zero)"
  }
 }

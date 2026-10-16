@@ -2,16 +2,18 @@
 forms of the contract instances the rules work on. Pure functions of their arguments and files."""
 
 import json
+import re
 from pathlib import Path
 
 from .rules import RUN_TOKEN, SOURCE_VARIABLES, plain_source, run_folder, shown, stamp_seconds
 
 RUN_MARKER = "run.json"
-MOST = 10  # list entries a constraint's expected or actual shows
+MOST = 10  # list entries (or keys) a constraint's expected or actual shows
 MAX_FILE_BYTES = 4_000_000  # far above any file a run writes (a receipt is about 40 KB)
 # What reading a file the agent's folder holds could raise if a check let an odd value through: a last
 # resort that turns it into a verdict naming the file (every field is checked before it is used).
 UNREADABLE = (ArithmeticError, LookupError, TypeError, ValueError, RecursionError)
+PLAIN_WORD = re.compile(r"[a-z]+ ")  # a first word that is a plain word: no path, snake_case name, number or quote
 
 
 def result(valid, message, *, score=None, **details):
@@ -24,24 +26,41 @@ def result(valid, message, *, score=None, **details):
 
 
 def compact(value):
-    """A value small enough for a verdict: lists cut to MOST entries."""
+    """A value small enough for a verdict: lists cut to MOST entries, mappings to MOST keys."""
     if isinstance(value, list) and len(value) > MOST:
         return value[:MOST] + [f"… {len(value) - MOST} more"]
+    if isinstance(value, dict) and len(value) > MOST:
+        return {**dict(list(value.items())[:MOST]), "…": f"{len(value) - MOST} more"}
     return value
 
 
-def constraint(identifier, text, ok, expected=None, actual=None, message=None):
-    """One constraint's entry: ok is True (holds), False (fails) or None (not checked: an earlier one it
-    depends on failed), with what was expected and found when they say something. A failed one says
-    why in plain words."""
-    entry = {"id": identifier, "constraint": text, "ok": ok}
-    if expected is not None:
-        entry["expected"] = compact(expected)
-    if actual is not None:
-        entry["actual"] = compact(actual)
-    if ok is False and message:
-        entry["message"] = message
-    return entry
+def sentence(text):
+    """``text`` with a capital first letter when it starts with a plain word ("the receipt ..."); a path, a
+    snake_case name, a number or a quote at its start stays as it is."""
+    return text[0].upper() + text[1:] if PLAIN_WORD.match(text) else text
+
+
+def constraint(identifier, text, ok, expected=None, actual=None, message=""):
+    """One constraint's entry, always with the same keys: ok is True (holds), False (fails) or None (not
+    checked: a check it needs did not hold); expected and actual where they say something, else None;
+    and message, why it fails or why it was not checked ("" when it holds)."""
+    return {
+        "id": identifier,
+        "constraint": text,
+        "ok": ok,
+        "expected": compact(expected),
+        "actual": compact(actual),
+        "message": "" if ok is True else sentence(message or text),
+    }
+
+
+def summary(constraints):
+    """A failed verdict's message: the first failing constraint (or, when none fails, the first not
+    checked), its id and why, then how many more fail: "values-exact: Auckland max_temp ... (+1 more)"."""
+    failed = [entry for entry in constraints if entry["ok"] is False]
+    first = failed[0] if failed else next(entry for entry in constraints if entry["ok"] is not True)
+    reason = first["message"].removesuffix(".")
+    return f"{first['id']}: {reason}" + (f" (+{len(failed) - 1} more)" if len(failed) > 1 else "")
 
 
 def read_json(path):
@@ -61,11 +80,11 @@ def run_marker(workspace, run):
     """(run ``run``'s marker {run, started}, None) or (None, what is wrong): the token's form (checked before
     it names any path), and its folder's marker naming it, with the UTC second the run made its folder."""
     if not isinstance(run, str) or not RUN_TOKEN.fullmatch(run):
-        return None, f"{shown(run)} is not a run token (16 hex digits): submit the report report_alerts returned"
+        return None, f"{shown(run)} is not a run token (16 hex digits): submit the report that report_alerts returned"
     where = f"{run_folder(run)}/{RUN_MARKER}"
     found, problem = read_json(Path(workspace) / where)
     if problem == "missing":
-        return None, f"this workspace has no run {run}: submit the report report_alerts returned"
+        return None, f"this workspace has no run {run} (no {where}): submit the report that report_alerts returned"
     if problem:
         return None, f"{where} is not a run marker: {problem}"
     if not isinstance(found, dict) or set(found) != {"run", "started"} or found["run"] != run:

@@ -89,6 +89,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.0,
-  "message_contains": "'Atlantis' is not one of the 30 cities"
+  "message_contains": "submitted-shape: The submitted report is malformed: 'Atlantis' is not one of the 30 cities"
  }
 }

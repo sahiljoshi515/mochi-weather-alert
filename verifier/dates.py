@@ -1,7 +1,7 @@
 """check_date and the check-date task: today's UTC date from the clock, and which data a daily-alert task
 on a date would use, re-derived by hand from the clock reading the answer carries."""
 
-from .checks import constraint, result
+from .checks import constraint, result, summary
 from .rules import (
     DATE,
     date_problem,
@@ -70,7 +70,7 @@ def answer_constraints(asked, output):
     clock = stamp_minutes(output.clock)
     if clock is None:
         first = constraint("clock", "The answer carries a UTC clock reading", False, "YYYY-MM-DDTHH:MM", output.clock, f"the clock {output.clock!r} is not a UTC time")
-        return [first] + [constraint(identifier, text, None) for identifier, text in REST]
+        return [first] + [constraint(identifier, text, None, message="Not checked: clock did not hold.") for identifier, text in REST]
     expected = expected_answer(asked, clock)
     actual = {
         "today": output.today,
@@ -86,8 +86,8 @@ def answer_constraints(asked, output):
         keys = FIELDS[identifier]
         want = {key: expected[key] for key in keys}
         got = {key: actual[key] for key in keys}
-        ok = want == got
-        found.append(constraint(identifier, text, ok, want, got, None if ok else f"{text}: expected {want}, got {got}"))
+        wrong = [f"{key} {got[key]!r}, expected {want[key]!r}" for key in keys if got[key] != want[key]]
+        found.append(constraint(identifier, text, not wrong, want, got, f"The answer says {'; '.join(wrong)}"))
     return found
 
 
@@ -126,10 +126,7 @@ def verify_output(input_value, output_value, workspace):
 
 def verify_task(arguments, output, reference, workspace):
     constraints = answer_constraints(arguments.date, output)
-    failed = [entry for entry in constraints if entry["ok"] is not True]
-    held = len(constraints) - len(failed)
-    if failed:
-        first = next((entry for entry in failed if entry["ok"] is False), failed[0])
-        message = f"{len(failed)} of {len(constraints)} checks failed. First: {first.get('message', first['constraint'])}"
-        return result(False, message, score=held / len(constraints) * 0.99, constraints=constraints)
+    held = sum(entry["ok"] is True for entry in constraints)
+    if held < len(constraints):
+        return result(False, summary(constraints), score=held / len(constraints) * 0.99, constraints=constraints)
     return result(True, f"All {len(constraints)} checks hold: {output.message}", score=1.0, constraints=constraints)

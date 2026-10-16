@@ -82,6 +82,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "15 cities unexamined"
+  "message_contains": "all-examined: 15 of the 30 cities were never examined"
  }
 }

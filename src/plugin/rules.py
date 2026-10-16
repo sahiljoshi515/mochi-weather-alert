@@ -59,9 +59,6 @@ LONGITUDE_OF = {city[0]: Decimal(city[3]) for city in CITIES}
 CITY_COUNT = len(CITIES)
 MAX_CITIES_PER_CALL = CITY_COUNT
 MAX_REPORT_ENTRIES = CITY_COUNT  # a report names each city at most once
-# Cities per report_alerts call on the prescribed path: a hosted model's reply (its reasoning included)
-# must stay under 2,048 tokens, so the task is judged in two halves.
-CHUNK = 15
 
 # ----- Rules and units -----
 
@@ -1049,7 +1046,3 @@ def plain_entries(expected: Expected) -> dict:
         "unavailable": [{"city": city, "variables": list(variables)} for city, variables in expected.unavailable.items()],
     }
 
-
-def expected_output(task: dict, source: dict, expected: Expected) -> dict:
-    """``expected`` as the task's output (an AlertReportOutput as JSON): what a perfect run submits."""
-    return {"task": dict(task), "data": dict(source), **plain_entries(expected)}

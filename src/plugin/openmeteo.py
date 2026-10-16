@@ -20,7 +20,6 @@ from plugin.rules import CITIES, ENDPOINTS, SOURCE_VARIABLES, source_request
 ARCHIVE = ENDPOINTS["archive"]
 SINGLE_RUN = ENDPOINTS["forecast"]
 SEASONAL = ENDPOINTS["outlook"]
-HOSTS = ("archive-api.open-meteo.com", "single-runs-api.open-meteo.com", "seasonal-api.open-meteo.com")
 USER_AGENT = "nanoagent-weather-alert/0.4.0 (+https://github.com/sahiljoshi515/mochi-weather-alert)"
 UNITS = {"temperature_2m": "°C", "relative_humidity_2m": "%", "precipitation": "mm", "wind_speed_10m": "km/h"}
 TRIES = 3

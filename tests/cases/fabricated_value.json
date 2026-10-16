@@ -87,6 +87,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "Wrong value"
+  "message_contains": "values-exact: Auckland max_temp is reported as 57.5, but get_daily gave 57.38"
  }
 }

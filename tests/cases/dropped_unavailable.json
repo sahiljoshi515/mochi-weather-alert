@@ -83,6 +83,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "Missing unavailable"
+  "message_contains": "unavailable-complete: Athens must be reported unavailable"
  }
 }

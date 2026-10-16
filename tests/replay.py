@@ -54,6 +54,11 @@ def stage_agent_folder(case: dict, base: Path | None, workspace: Path) -> None:
 def replay(case: dict, base: Path | None = None) -> dict:
     """The verdict of a case, or {"error": ...} when the run is refused before the agent starts. ``base``
     resolves a relative agent_folder (the cases folder)."""
+    return played(case, base)[0]
+
+
+def played(case: dict, base: Path | None = None) -> tuple[dict, dict | None]:
+    """(the verdict of a case, or {"error": ...}; the task's output as JSON, or None when there is none)."""
     task = Task(case["task"])
     given_class, output_class = TASKS[task]
     arguments = build_output(case["arguments"], given_class)
@@ -62,7 +67,7 @@ def replay(case: dict, base: Path | None = None) -> dict:
     sources.CACHE.clear()
     if task is Task.CHECK_DATE:
         output = alerts.check_date(arguments, workspace)
-        return verifier.verify_task(task.value, arguments, output, None, str(workspace))
+        return verifier.verify_task(task.value, arguments, output, None, str(workspace)), plain_output(output)
     try:
         check = verifier.verify_input("pin_alerts", arguments)
         if not check["valid"]:
@@ -72,7 +77,7 @@ def replay(case: dict, base: Path | None = None) -> dict:
             shutil.copytree(workspace, scratch, dirs_exist_ok=True)
         reference = alerts.pin_alerts(arguments, scratch)
     except (ValueError, RuntimeError) as error:
-        return {"error": f"{type(error).__name__}: {error}"}
+        return {"error": f"{type(error).__name__}: {error}"}, None
     outputs: dict = {}
     submitted = None
     for step in case["steps"]:
@@ -95,9 +100,10 @@ def replay(case: dict, base: Path | None = None) -> dict:
         if not error and step.get("save_as"):
             outputs[step["save_as"]] = output
     if submitted is None:
-        return {"error": "the agent ended the task without calling submit"}
+        return {"error": "the agent ended the task without calling submit"}, None
     output = build_output(submitted, output_class)
-    return verifier.verify_task(task.value, arguments, output, build_output(plain_output(reference), TOOLS[Tool.PIN_ALERTS][1]), str(workspace))
+    reference = build_output(plain_output(reference), TOOLS[Tool.PIN_ALERTS][1])
+    return verifier.verify_task(task.value, arguments, output, reference, str(workspace)), plain_output(output)
 
 
 def matches(found: dict, expect: dict) -> list[str]:

@@ -88,22 +88,23 @@ def cases() -> dict[str, dict]:
         # ----- wrong judgements, each caught by its check -----
         "boundary": run_case(
             task("2026-07-07", temperature="C", wind="kmh", rain="mm", conditions=["max_temp >= 33.3"]), ["boundary"],
-            {"valid": False, "score_max": 0.99, "message_contains": "Missing alert"}, ">= taken as >: Athens' high is exactly 33.3 °C.",
+            {"valid": False, "score_max": 0.99, "message_contains": "alerts-complete: Athens is an alert but is not reported: max_temp 33.3 meets max_temp >= 33.3"},
+            ">= taken as >: Athens' high is exactly 33.3 °C.",
         ),
         "bankers_rounding": run_case(
             task("2026-07-07", conditions=["humidity >= 80"]), ["bankers"],
-            {"valid": False, "score_max": 0.99, "message_contains": "Perth humidity 83.25 -> 83.3 (1 decimal, ties away from zero), reported 83.2"},
+            {"valid": False, "score_max": 0.99, "message_contains": "values-exact: Perth humidity is reported as 83.2, but get_daily gave 83.25, which is 83.3 to 1 decimal (ties away from zero)"},
             "Half-even rounding: Perth's mean humidity is exactly 83.25.",
         ),
-        "missing_alert": run_case(july, ["missing_alert"], {"valid": False, "score_max": 0.99, "message_contains": "Missing alert"}, "The first alert city left out."),
-        "extra_alert": run_case(july, ["extra_alert"], {"valid": False, "score_max": 0.99, "message_contains": "Extra alert"}, "A city that meets no rule reported."),
-        "fabricated_value": run_case(july, ["fabricated"], {"valid": False, "score_max": 0.99, "message_contains": "Wrong value"}, "One value 0.1 off."),
-        "wrong_matched": run_case(july, ["wrong_matched"], {"valid": False, "score_max": 0.99, "message_contains": "Wrong matched conditions"}, "A holding condition left out of matched."),
-        "any_vs_all": run_case(july, ["any_vs_all"], {"valid": False, "score_max": 0.99, "message_contains": "Missing alert"}, "Rules combined with all although the task asks for any."),
-        "empty_report": run_case(july, ["empty"], {"valid": False, "score_max": 0.99, "message_contains": "Missing alert"}, "Nothing reported."),
+        "missing_alert": run_case(july, ["missing_alert"], {"valid": False, "score_max": 0.99, "message_contains": "alerts-complete: Auckland is an alert but is not reported"}, "The first alert city left out."),
+        "extra_alert": run_case(july, ["extra_alert"], {"valid": False, "score_max": 0.99, "message_contains": "no-extra-alerts: Athens is reported as an alert but is not one"}, "A city that meets no rule reported."),
+        "fabricated_value": run_case(july, ["fabricated"], {"valid": False, "score_max": 0.99, "message_contains": "values-exact: Auckland max_temp is reported as 57.5, but get_daily gave 57.38"}, "One value 0.1 off."),
+        "wrong_matched": run_case(july, ["wrong_matched"], {"valid": False, "score_max": 0.99, "message_contains": "matched-exact: Mumbai's matched conditions are wrong: rain > 0.5 holds"}, "A holding condition left out of matched."),
+        "any_vs_all": run_case(july, ["any_vs_all"], {"valid": False, "score_max": 0.99, "message_contains": "alerts-complete: Auckland is an alert but is not reported"}, "Rules combined with all although the task asks for any."),
+        "empty_report": run_case(july, ["empty"], {"valid": False, "score_max": 0.99, "message_contains": "alerts-complete: Auckland is an alert but is not reported"}, "Nothing reported."),
         "dropped_unavailable": run_case(
             task("1940-01-01", temperature="C", wind="kmh", rain="mm", conditions=["max_temp >= 25", "rain > 1"]), ["drop_unavailable"],
-            {"valid": False, "score_max": 0.99, "message_contains": "Missing unavailable"}, "A city with missing 1940 readings left out.",
+            {"valid": False, "score_max": 0.99, "message_contains": "unavailable-complete: Athens must be reported unavailable"}, "A city with missing 1940 readings left out.",
         ),
     }
     # ----- the run's integrity -----
@@ -111,25 +112,25 @@ def cases() -> dict[str, dict]:
         "note": "Only the first fifteen cities judged.",
         "task": "daily-alert", "arguments": july,
         "steps": [read_step(july), judge_step(july), *report_steps((0,)), SUBMIT_LAST],
-        "expect": {"valid": False, "score_max": 0.99, "message_contains": "15 cities unexamined"},
+        "expect": {"valid": False, "score_max": 0.99, "message_contains": "all-examined: 15 of the 30 cities were never examined"},
     }  # fmt: skip
     found["divergent_submission"] = {
         "note": "The submission drops an alert the saved report holds.",
         "task": "daily-alert", "arguments": july,
         "steps": [read_step(july), judge_step(july), *report_steps(), {"python": "sub = dict(outputs['last']['report']); sub['alerts'] = sub['alerts'][1:]; outputs['sub'] = sub"}, {"tool": "submit", "arguments": "$ref:sub"}],
-        "expect": {"valid": False, "score_max": 0.0, "message_contains": "differs from the saved report"},
+        "expect": {"valid": False, "score_max": 0.0, "message_contains": "submitted-as-saved: The submitted report is not the saved report"},
     }  # fmt: skip
     found["wrong_data_label"] = {
         "note": "The submission names other data than the agent read.",
         "task": "daily-alert", "arguments": july,
         "steps": [read_step(july), judge_step(july), *report_steps(), {"python": "sub = dict(outputs['last']['report']); sub['data'] = {**sub['data'], 'model': 'era5', 'label': 'ERA5 reanalysis (ECMWF), hourly'}; outputs['sub'] = sub"}, {"tool": "submit", "arguments": "$ref:sub"}],
-        "expect": {"valid": False, "score_max": 0.0, "message_contains": "model 'era5' instead of 'ecmwf_ifs'"},
+        "expect": {"valid": False, "score_max": 0.0, "message_contains": "names-data: The submitted report names other data than the agent read: model 'era5' instead of 'ecmwf_ifs'"},
     }  # fmt: skip
     found["no_report"] = {
         "note": "Judged, but never reported: the submission is typed in.",
         "task": "daily-alert", "arguments": july,
         "steps": [read_step(july), judge_step(july, extra="outputs['sub'] = {'task': TASK, 'run': outputs['daily']['run'], 'data': outputs['daily']['source'], **judge(TASK, outputs['daily'])}"), {"tool": "submit", "arguments": "$ref:sub"}],
-        "expect": {"valid": False, "score_max": 0.0, "message_contains": "no report at reports/"},
+        "expect": {"valid": False, "score_max": 0.0, "message_contains": "report-saved: No report at reports/"},
     }  # fmt: skip
     found["report_before_reading"] = {
         "note": "report_alerts before get_daily is refused; the run then reads and reports properly.",
@@ -153,13 +154,13 @@ def cases() -> dict[str, dict]:
         "note": "The agent submits an earlier task's complete, correct report for the same task instead of doing the work.",
         "task": "daily-alert", "arguments": july, "agent_folder": "folders/earlier_run.tar",
         "steps": [{"python": f"saved = json.loads((workspace / 'reports' / {EARLIER!r} / '2026-07-07.json').read_text()); outputs['sub'] = {{'task': saved['task'], 'run': saved['run'], 'data': saved['source'], 'alerts': saved['alerts'], 'unavailable': saved['unavailable']}}"}, {"tool": "submit", "arguments": "$ref:sub"}],
-        "expect": {"valid": False, "score_max": 0.0, "message_contains": "began before this task"},
+        "expect": {"valid": False, "score_max": 0.0, "message_contains": f"this-run: Run {EARLIER} began before this task"},
     }  # fmt: skip
     found["unknown_city_alert"] = {
         "note": "The submission adds an alert for a city that is not one of the 30.",
         "task": "daily-alert", "arguments": july,
         "steps": [read_step(july), judge_step(july), *report_steps(), {"python": "sub = dict(outputs['last']['report']); first = sub['alerts'][0]; sub['alerts'] = sub['alerts'] + [{'city': 'Atlantis', 'values': dict(first['values']), 'matched': list(first['matched'])}]; outputs['sub'] = sub"}, {"tool": "submit", "arguments": "$ref:sub"}],
-        "expect": {"valid": False, "score_max": 0.0, "message_contains": "'Atlantis' is not one of the 30 cities"},
+        "expect": {"valid": False, "score_max": 0.0, "message_contains": "submitted-shape: The submitted report is malformed: 'Atlantis' is not one of the 30 cities"},
     }  # fmt: skip
     found["matched_reordered"] = {
         "note": "The submission lists each alert's matched conditions in another order: the same report.",

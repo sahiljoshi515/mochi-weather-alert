@@ -81,6 +81,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "Missing alert"
+  "message_contains": "alerts-complete: Athens is an alert but is not reported: max_temp 33.3 meets max_temp >= 33.3"
  }
 }

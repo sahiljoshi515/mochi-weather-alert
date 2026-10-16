@@ -1,7 +1,7 @@
 // How this plugin's page draws its tasks' outputs: the daily-alert report (an AlertReportOutput) with
 // the rules asked for, one row per alert city with its values in the requested units and the rules it
-// met, the cities with a missing reading, the data the values come from, and the verdict's checks; and
-// the date check (a DateOutput) with each kind of data's date range.
+// met, the cities with a missing reading and the data the values come from; and the date check (a
+// DateOutput) with each kind of data's date range. Each ends with the verdict's checks.
 import { dataTable, disclosure, h, icon, plural, statusPill } from "./kit/components.js";
 
 const VARIABLES = ["max_temp", "min_temp", "rain", "wind", "humidity"];
@@ -101,26 +101,51 @@ function sourceLine(data) {
   );
 }
 
-/** The verdict's checks, each with whether it holds and, when it fails, why. */
+/** A check's expected or actual value as short text: lists joined, mappings as "key value" pairs. */
+function valueText(value) {
+  if (value === null || value === undefined) return "—";
+  if (Array.isArray(value)) return value.length ? value.map(valueText).join(", ") : "none";
+  if (typeof value === "object") {
+    const pairs = Object.entries(value);
+    return pairs.length ? pairs.map(([key, item]) => `${key} ${valueText(item)}`).join("; ") : "none";
+  }
+  return String(value);
+}
+
+const clipped = (text, most = 240) => (text.length > most ? `${text.slice(0, most - 1)}…` : text);
+const MARK = { ok: ["check", "holds"], bad: ["error", "fails"], skip: ["minus", "not checked"] };
+
+/** The verdict's checks, in order: ✓ holds; ✗ fails, with why and what was expected against what was
+ *  found; – not checked, with the earlier check it needed. */
 function checksList(verdict) {
-  const constraints = verdict && verdict.details && Array.isArray(verdict.details.constraints) ? verdict.details.constraints : [];
+  const constraints = Array.isArray(verdict?.details?.constraints) ? verdict.details.constraints : [];
   if (!constraints.length) return null;
   const failed = constraints.filter((entry) => entry.ok === false).length;
-  const held = constraints.filter((entry) => entry.ok === true).length;
+  const skipped = constraints.filter((entry) => entry.ok !== true && entry.ok !== false).length;
   const items = constraints.map((entry) => {
     const state = entry.ok === true ? "ok" : entry.ok === false ? "bad" : "skip";
-    const mark = entry.ok === true ? "check" : entry.ok === false ? "error" : "minus";
-    const word = entry.ok === true ? "holds" : entry.ok === false ? "fails" : "not checked";
+    const [mark, word] = MARK[state];
+    const values = entry.ok === false && entry.expected != null && entry.actual != null;
     return h(
       "li",
       { class: `check check-${state}` },
-      icon(mark, { size: 14, label: word }),
-      h("span", { text: ` ${entry.constraint}` }),
-      entry.ok === false && entry.message ? h("p", { class: "check-message small-text", text: entry.message }) : null,
+      h("div", { class: "check-head" }, icon(mark, { size: 14, label: word }), h("span", { text: entry.constraint }), h("code", { class: "check-id", text: entry.id })),
+      entry.ok !== true && entry.message ? h("p", { class: "check-message small-text", text: entry.message }) : null,
+      values
+        ? h(
+            "p",
+            { class: "check-values small-text" },
+            h("span", { class: "muted", text: "Expected: " }),
+            clipped(valueText(entry.expected)),
+            h("span", { class: "muted", text: " · Actual: " }),
+            clipped(valueText(entry.actual)),
+          )
+        : null,
     );
   });
+  const hint = [failed ? `${failed} failed` : "", skipped ? `${skipped} not checked` : ""].filter(Boolean).join(", ") || "all hold";
   return disclosure(
-    { summary: `Checks: ${held} of ${constraints.length} hold`, open: failed > 0, hint: failed ? plural(failed, "failed", "failed") : "all hold" },
+    { summary: `Checks: ${constraints.length - failed - skipped} of ${constraints.length} hold`, open: failed > 0, hint },
     h("ol", { class: "checks" }, items),
   );
 }
@@ -143,7 +168,7 @@ function alertReport({ task, data, alerts, unavailable }, { verdict } = {}) {
   );
 }
 
-function dateCheck(answer) {
+function dateCheck(answer, { verdict } = {}) {
   const ranges = [
     ["archive", answer.archive_first, answer.archive_last],
     ["forecast", answer.forecast_first, answer.forecast_last],
@@ -166,10 +191,11 @@ function dateCheck(answer) {
       ),
     ),
     h("p", { class: "muted small-text", text: `Clock ${answer.clock} UTC; today is ${answer.today}.` }),
+    checksList(verdict),
   );
 }
 
 export default {
   AlertReportOutput: (value, context) => alertReport(value, context),
-  DateOutput: (value) => dateCheck(value),
+  DateOutput: (value, context) => dateCheck(value, context),
 };

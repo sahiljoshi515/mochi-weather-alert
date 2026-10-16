@@ -89,6 +89,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.0,
-  "message_contains": "model 'era5' instead of 'ecmwf_ifs'"
+  "message_contains": "names-data: The submitted report names other data than the agent read: model 'era5' instead of 'ecmwf_ifs'"
  }
 }

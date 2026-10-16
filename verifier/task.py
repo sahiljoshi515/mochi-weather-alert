@@ -9,15 +9,17 @@ workspace are judged apart; the run must have begun after the answer key (it is 
 answer key saw in the workspace, and its marker's time is not before the answer key's last fetch), so a
 report left by an earlier task never passes for this one."""
 
-from .checks import compact, constraint, entries_of, plain_candidate, result, run_marker
+from .checks import compact, constraint, entries_of, plain_candidate, result, run_marker, summary
 from .pin import pin_problems
 from .receipt import receipt_of
 from .report import compare, saved_report
 from .rules import (
     CITY_NAMES,
     DELTA_MINUTES,
+    SOURCE_KEYS,
     SOURCE_OF,
     SOURCE_VARIABLES,
+    TASK_KEYS,
     DataKind,
     Units,
     canonical_judgement,
@@ -30,9 +32,11 @@ from .rules import (
     holds,
     judgement_problem,
     key_of,
+    needed_variables,
     parse_conditions,
     plain_source,
     plain_task,
+    report_path,
     seconds_text,
     stamp_minutes,
     stamp_seconds,
@@ -43,31 +47,33 @@ from .rules import (
 )
 
 TEXT = {
-    "answer-key": "The answer key pinned the data for this date",
-    "task-input": "The task input is a valid date and 1 to 6 conditions",
-    "answer-key-data": "The answer key's data is well formed: every city's local day, its readings and their hash",
-    "answer-key-rules": "The answer key used the data the date rules choose at its clock",
-    "this-run": "The report names a run of this task: one that began after the answer key",
-    "agent-read": "That run's agent read this date's data with get_daily",
+    "answer-key": "The answer key pinned data for this date",
+    "task-input": "The task is a valid date with 1 to 6 conditions",
+    "answer-key-data": "The answer key's data is well formed: each city's local day, its readings and their hash",
+    "answer-key-rules": "The answer key used the data the date rules choose",
+    "this-run": "The report names this task's own run, begun after the answer key",
+    "agent-read": "The agent read the date's data with get_daily",
     "agent-source": "The agent read a source the answer key pinned",
-    "agent-data": "The agent's data is the pinned data, reading for reading",
-    "report-saved": "report_alerts saved that run's report for this task, on the data the agent read",
-    "submitted-task": "The submitted report is for the task input",
+    "agent-data": "The agent's readings equal the answer key's",
+    "report-saved": "report_alerts saved the run's report for this task and data",
+    "submitted-task": "The submitted report is for this task",
     "submitted-shape": "The submitted report is well formed",
-    "submitted-as-saved": "The submitted report is the saved report, unchanged",
+    "submitted-as-saved": "The submitted report equals the saved report",
     "names-data": "The submitted report names the data the agent read",
     "all-examined": "All 30 cities were examined",
-    "alerts-complete": "Every city whose day meets the rules is reported as an alert",
-    "no-extra-alerts": "No city is reported as an alert that is not one",
-    "values-exact": "Every alert's values are exact: the task's units, rounded to 1 decimal, ties away from zero",
-    "matched-exact": "Every alert's matched conditions are exactly those that hold",
-    "unavailable-complete": "Every city missing a reading a condition needs is reported unavailable",
-    "no-extra-unavailable": "No city that has its readings is reported unavailable",
-    "unavailable-exact": "Every unavailable city names exactly the variables it lacks",
+    "alerts-complete": "Every city that meets the rules is reported as an alert",
+    "no-extra-alerts": "No city is reported as an alert without meeting the rules",
+    "values-exact": "Each alert's values are right: the task's units, 1 decimal, ties away from zero",
+    "matched-exact": "Each alert lists exactly the conditions that hold",
+    "unavailable-complete": "Every city missing a needed reading is reported unavailable",
+    "no-extra-unavailable": "No city with all its needed readings is reported unavailable",
+    "unavailable-exact": "Each unavailable city names exactly the variables it lacks",
 }
 ORDER = tuple(TEXT)
 GATES = ORDER[:13]  # the data and the report's integrity: any failure scores 0
+ALERT_CHECKS = ORDER[14:]  # the alert and unavailable cities, judged against the pinned data
 MOST_NAMED = 3  # cities a failure message names
+SUBMIT = "Submit the report the last report_alerts call returned, as it is."
 # Why a source's data cannot change between two fetches minutes apart; the seasonal outlook alone can.
 FINAL = {
     DataKind.FORECAST.value: "a forecast run's data never changes",
@@ -101,27 +107,38 @@ def first_difference(pinned, read):
     return "the readings differ"
 
 
+def changed_fields(given, wanted, keys):
+    """The fields ``given`` holds differently from ``wanted``, in words: "match 'all' instead of 'any'"."""
+    return "; ".join(f"{key} {given.get(key)!r} instead of {wanted.get(key)!r}" for key in keys if given.get(key) != wanted.get(key))
+
+
 def given(task, series, step_hours, variable):
     """The value get_daily gives a city for a variable (exact, cut to 9 decimals), as its shortest text."""
     units = Units(task["temperature_unit"], task["wind_unit"], task["rain_unit"])
     return canonical_number(truncate(convert(variable, exact_metric(day_metrics(series, step_hours), variable), units)))
 
 
+def reading(task, series, step_hours, variable):
+    """A variable with the value get_daily gives a city for it: "max_temp 91.94"."""
+    return f"{variable} {given(task, series, step_hours, variable)}"
+
+
 def why_not_alert(task, series, step_hours):
-    """Why a city that is not an alert is not one: each condition that fails, on the exact value."""
+    """Why a city that is not an alert is not one: it lacks a reading, or each condition that fails, on
+    the value get_daily gives."""
     conditions = parse_conditions(task["conditions"])
-    units = Units(task["temperature_unit"], task["wind_unit"], task["rain_unit"])
     day = day_metrics(series, step_hours)
-    lacking = [variable for variable in {condition.variable for condition in conditions} if SOURCE_OF[variable] in day.missing]
+    lacking = [variable for variable in needed_variables(conditions) if SOURCE_OF[variable] in day.missing]
     if lacking:
-        return f"{series['city']} lacks a reading for {', '.join(sorted(lacking))}, so it is unavailable, never an alert"
-    reasons = []
+        return f"it lacks a reading for {', '.join(lacking)}, so it is unavailable, never an alert"
+    units = Units(task["temperature_unit"], task["wind_unit"], task["rain_unit"])
+    failing = []
     for condition in conditions:
         value = convert(condition.variable, exact_metric(day, condition.variable), units)
         if not holds(value, condition):
-            reasons.append(f"{condition.variable} {canonical_number(truncate(value))} is not {condition.op} {condition.threshold}")
-    rule = "every condition must hold" if task["match"] == "all" else "no condition holds"
-    return f"{series['city']} is no alert ({rule}): {'; '.join(reasons[:2])}"
+            failing.append(f"{condition.variable} {canonical_number(truncate(value))} is not {condition.op} {condition.threshold}")
+    rule = "every condition must hold" if task["match"] == "all" else "at least one condition must hold"
+    return f"{'; '.join(failing)} (with match {task['match']}, {rule})"
 
 
 def named(cities):
@@ -129,47 +146,76 @@ def named(cities):
     return shown + (f" and {len(cities) - MOST_NAMED} more" if len(cities) > MOST_NAMED else "")
 
 
-def entry_messages(task, expected, differences, series_of, step_hours):
-    """Plain messages for the alert constraints (15 to 21), each naming the first cities concerned and
-    showing a value as get_daily gave it beside its rounded report (91.94 -> 91.9)."""
+def also(words, cities):
+    """The sentence naming a failure's other cities, " Also <words>: B, C, D and 2 more.", or "" for one city."""
+    return f" Also {words}: {named(cities[1:])}." if len(cities) > 1 else ""
+
+
+def alert_failures(task, expected, differences, series_of, step_hours):
+    """For each alert constraint (15 to 21) that fails: (expected, actual, message). expected and actual
+    hold only the cities concerned; the message explains the first of them, showing a value as get_daily
+    gave it (exact, cut to 9 decimals) beside its rounded report."""
     alerts = {alert.city: alert for alert in expected.alerts}
     conditions = parse_conditions(task["conditions"])
-    messages = {}
-    if differences["missing_alerts"]:
-        cities = differences["missing_alerts"]
-        first = alerts[cities[0]]
-        series = series_of[cities[0]]
-        values = ", ".join(f"{name} {given(task, series, step_hours, name)} -> report {value}" for name, value in first.values.items())
-        messages["alerts-complete"] = f"Missing alert {named(cities)}: {cities[0]} has {values}; it meets {', '.join(first.matched)}"
-    if differences["extra_alerts"]:
-        cities = differences["extra_alerts"]
+    condition_of = {condition.text: condition for condition in conditions}
+    found = {}
+    cities = differences["missing_alerts"]
+    if cities:
+        first, series = alerts[cities[0]], series_of[cities[0]]
+        reasons = "; ".join(f"{reading(task, series, step_hours, condition.variable)} meets {condition.text}" for condition in conditions if condition.text in first.matched)
+        report = ", ".join(f"{name} {value}" for name, value in first.values.items())
+        message = f"{cities[0]} is an alert but is not reported: {reasons}, so report it with {report}.{also('not reported', cities)}"
+        found["alerts-complete"] = (cities, [], message)
+    cities = differences["extra_alerts"]
+    if cities:
         series = series_of.get(cities[0])
         reason = why_not_alert(task, series, step_hours) if series else f"{cities[0]!r} is not one of the 30 cities"
-        messages["no-extra-alerts"] = f"Extra alert {named(cities)}: {reason}"
-    if differences["value_mismatches"]:
-        city, wrong = next(iter(differences["value_mismatches"].items()))
-        variable, values = next(iter(wrong.items()))
-        exact = given(task, series_of[city], step_hours, variable)
-        messages["values-exact"] = (
-            f"Wrong value in {named(sorted(differences['value_mismatches']))}: {city} {variable} {exact} -> {values['expected']} "
-            f"(1 decimal, ties away from zero), reported {values['reported']}"
+        found["no-extra-alerts"] = ([], cities, f"{cities[0]} is reported as an alert but is not one: {reason}.{also('reported but not alerts', cities)}")
+    wrong = differences["value_mismatches"]
+    if wrong:
+        cities = sorted(wrong)
+        variable, values = next(iter(wrong[cities[0]].items()))
+        exact = given(task, series_of[cities[0]], step_hours, variable)
+        message = (
+            f"{cities[0]} {variable} is reported as {values['reported']}, but get_daily gave {exact}, which is "
+            f"{values['expected']} to 1 decimal (ties away from zero).{also('wrong', cities)}"
         )
-    if differences["matched_mismatches"]:
-        city, both = next(iter(differences["matched_mismatches"].items()))
-        messages["matched-exact"] = f"Wrong matched conditions for {named(sorted(differences['matched_mismatches']))}: {city} meets {both['expected']}, reported {both['reported']}"
-    if differences["missing_unavailable"]:
-        cities = differences["missing_unavailable"]
-        variable = expected.unavailable[cities[0]][0]
-        gap = first_gap(series_of[cities[0]], SOURCE_OF[variable], step_hours)
-        messages["unavailable-complete"] = f"Missing unavailable {named(cities)}: {cities[0]} has no {SOURCE_OF[variable]} reading at {gap}, so no {variable}"
-    if differences["extra_unavailable"]:
-        cities = differences["extra_unavailable"]
-        needed = sorted({condition.variable for condition in conditions})
-        messages["no-extra-unavailable"] = f"Extra unavailable {named(cities)}: {cities[0]} has every reading of {', '.join(needed)}"
-    if differences["unavailable_mismatches"]:
-        city, both = next(iter(differences["unavailable_mismatches"].items()))
-        messages["unavailable-exact"] = f"Wrong variables for {named(sorted(differences['unavailable_mismatches']))}: {city} lacks {both['expected']}, reported {both['reported']}"
-    return messages
+        found["values-exact"] = (
+            {city: {name: pair["expected"] for name, pair in wrong[city].items()} for city in cities},
+            {city: {name: pair["reported"] for name, pair in wrong[city].items()} for city in cities},
+            message,
+        )
+    wrong = differences["matched_mismatches"]
+    if wrong:
+        cities = sorted(wrong)
+        both, series = wrong[cities[0]], series_of[cities[0]]
+        value = {text: reading(task, series, step_hours, condition.variable) for text, condition in condition_of.items()}
+        parts = [f"{text} holds ({value[text]}) but is not listed" for text in both["expected"] if text not in both["reported"]]
+        parts += [f"{text} is listed but does not hold ({value[text]})" for text in both["reported"] if text not in both["expected"]]
+        found["matched-exact"] = (
+            {city: wrong[city]["expected"] for city in cities},
+            {city: wrong[city]["reported"] for city in cities},
+            f"{cities[0]}'s matched conditions are wrong: {'; '.join(parts)}.{also('wrong', cities)}",
+        )
+    cities = differences["missing_unavailable"]
+    if cities:
+        lacks = expected.unavailable[cities[0]]
+        source = SOURCE_OF[lacks[0]]
+        gap = first_gap(series_of[cities[0]], source, step_hours)
+        where = f"no {source} reading at {gap}" if gap else f"a missing {source} reading"
+        message = f"{cities[0]} must be reported unavailable (it lacks {', '.join(lacks)}): it has {where}.{also('not reported unavailable', cities)}"
+        found["unavailable-complete"] = (cities, [], message)
+    cities = differences["extra_unavailable"]
+    if cities:
+        needed = ", ".join(needed_variables(conditions))
+        found["no-extra-unavailable"] = ([], cities, f"{cities[0]} is reported unavailable but has every reading of {needed}.{also('reported unavailable', cities)}")
+    wrong = differences["unavailable_mismatches"]
+    if wrong:
+        cities = sorted(wrong)
+        both = wrong[cities[0]]
+        message = f"{cities[0]} lacks {', '.join(both['expected'])}, but the report lists {', '.join(both['reported'])}.{also('wrong', cities)}"
+        found["unavailable-exact"] = ({city: wrong[city]["expected"] for city in cities}, {city: wrong[city]["reported"] for city in cities}, message)
+    return found
 
 
 def source_mismatch(receipt, candidates, pinned_at):
@@ -227,10 +273,50 @@ def pinned_second(reference):
     return None if clock is None else clock * 60
 
 
-def source_fields(named_data, read):
-    """The data source fields the submission gives differently from the receipt, in words."""
-    keys = [key for key in ("kind", "model", "run", "step_hours", "today", "label") if named_data.get(key) != read.get(key)]
-    return "; ".join(f"{key} {named_data.get(key)!r} instead of {read.get(key)!r}" for key in keys)
+def saved_problem(saved, task, receipt, where):
+    """Why a well-formed saved report does not count for this task and the data the agent read, or None."""
+    if canonical_task(saved["task"]) != canonical_task(task):
+        return f"The saved report {where} is for another task: {changed_fields(canonical_task(saved['task']), canonical_task(task), TASK_KEYS)}."
+    if receipt is None:
+        return None
+    if saved["source"] != receipt["source"]:
+        return f"The saved report {where} judges the {saved['source']['label']}, but get_daily read the {receipt['source']['label']}."
+    if saved["sha256"] != receipt["sha256"]:
+        return f"The saved report {where} judges other readings (sha256 {saved['sha256'][:16]}…) than get_daily read (sha256 {receipt['sha256'][:16]}…)."
+    return None
+
+
+def judgement_difference(saved, submitted):
+    """The first way two judgements (canonical_judgement's alerts and unavailable cities) differ, in words,
+    or None when they are the same."""
+    for kind, want, got in (("alert", saved[0], submitted[0]), ("unavailable entry", saved[1], submitted[1])):
+        for city in sorted(set(want) | set(got)):
+            if city not in got:
+                return f"it leaves out the saved {kind} for {city}"
+            if city not in want:
+                return f"it adds an {kind} for {city} that the saved report does not hold"
+            if want[city] != got[city]:
+                return f"{city}'s {kind} reads {shown_entry(got[city])} in the submission but {shown_entry(want[city])} in the saved report"
+    return None
+
+
+def shown_entry(entry):
+    """A canonical alert (values, matched) or unavailable entry (variables) as short text."""
+    if isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[0], dict):
+        values = ", ".join(f"{name} {value}" for name, value in entry[0].items())
+        return f"{values} matching {', '.join(entry[1])}"
+    return ", ".join(entry)
+
+
+def counts(judgement):
+    return {"alerts": len(judgement["alerts"]), "unavailable": len(judgement["unavailable"])}
+
+
+def held(count, expected, label):
+    """A valid verdict's message."""
+    alerts, unavailable = len(expected.alerts), len(expected.unavailable)
+    cities = f"{alerts} of the 30 cities {'is an alert' if alerts == 1 else 'are alerts'}"
+    return f"All {count} checks hold: {cities} and {unavailable} {'is' if unavailable == 1 else 'are'} unavailable, judged on the {label}."
 
 
 def verify_task(arguments, output, reference, workspace):
@@ -240,29 +326,36 @@ def verify_task(arguments, output, reference, workspace):
     checks = {}
     details = {"rerun": False}
 
-    def put(identifier, ok, expected=None, actual=None, message=None):
+    def put(identifier, ok, expected=None, actual=None, message=""):
         checks[identifier] = constraint(identifier, TEXT[identifier], ok, expected, actual, message)
 
-    def holds_(*identifiers):
+    def skip(identifier, *needs):
+        """Not checked: one of the checks it needs did not hold."""
+        blocking = [need for need in needs if checks[need]["ok"] is not True]
+        checks[identifier] = constraint(identifier, TEXT[identifier], None, message=f"Not checked: {' and '.join(blocking)} did not hold.")
+
+    def hold(*identifiers):
         return all(checks[identifier]["ok"] is True for identifier in identifiers)
 
     # 1-4: the answer key.
     if reference is None:
-        put("answer-key", False, date, None, f"No pinned data for {date}: the answer key never fetched the day.")
+        put("answer-key", False, date, None, f"No answer key for {date}: pin_alerts never fetched the day.")
     else:
-        put("answer-key", reference.date == date, date, reference.date, f"The answer key pinned {reference.date}, not {date}.")
+        put("answer-key", reference.date == date, date, reference.date, f"The answer key is for {reference.date}, not {date}.")
     problem = task_problem(task)
     put("task-input", problem is None, None, None, problem)
     candidates = []
-    if holds_("answer-key", "task-input"):
+    if hold("answer-key", "task-input"):
         shape, rules = pin_problems(task, reference)
         put("answer-key-data", shape is None, None, None, shape)
-        put("answer-key-rules", None if shape else rules is None, None, None, rules)
         if shape is None:
+            put("answer-key-rules", rules is None, None, None, rules)
             candidates = [plain_candidate(candidate) for candidate in reference.candidates]
+        else:
+            skip("answer-key-rules", "answer-key-data")
     else:
-        put("answer-key-data", None)
-        put("answer-key-rules", None)
+        skip("answer-key-data", "answer-key", "task-input")
+        skip("answer-key-rules", "answer-key", "task-input")
 
     # 5-8: the run the submission names, and the data its agent read.
     run = output.run
@@ -278,63 +371,77 @@ def verify_task(arguments, output, reference, workspace):
             )
     put("this-run", problem is None, None, run, problem)
     receipt = None
-    if holds_("this-run", "task-input"):
+    if hold("this-run", "task-input"):
         receipt, problem = receipt_of(workspace, date, run)
         put("agent-read", receipt is not None, None, receipt["source"]["label"] if receipt else None, problem)
     else:
-        put("agent-read", None)
+        skip("agent-read", "this-run", "task-input")
     match = None
-    if receipt is not None and holds_("answer-key-data", "answer-key-rules"):
+    if receipt is not None and hold("answer-key-data", "answer-key-rules"):
         found = [candidate for candidate in candidates if key_of(candidate["source"]) == key_of(receipt["source"])]
-        message = None
+        message = ""
         if not found:
             details["rerun"] = True
             message = source_mismatch(receipt, candidates, stamp_minutes(reference.clock))
         put("agent-source", bool(found), [candidate["source"]["label"] for candidate in candidates], receipt["source"]["label"], message)
         match = found[0] if found else None
     else:
-        put("agent-source", None)
+        skip("agent-source", "agent-read", "answer-key-data", "answer-key-rules")
     if match is not None:
         identical = match["sha256"] == receipt["sha256"]
-        message = None
+        message = ""
         if not identical:
             message, rerun = data_mismatch(match, receipt)
             details["rerun"] = details["rerun"] or rerun
-        put("agent-data", identical, match["sha256"][:16], receipt["sha256"][:16], message)
+        put("agent-data", identical, f"sha256 {match['sha256'][:16]}…", f"sha256 {receipt['sha256'][:16]}…", message)
     else:
-        put("agent-data", None)
+        skip("agent-data", "agent-source")
 
     # 9-13: the saved and the submitted report.
     saved = None
-    if holds_("this-run", "task-input"):
+    if hold("this-run", "task-input"):
         saved, problem = saved_report(workspace, date, run)
-        if saved is not None and canonical_task(saved["task"]) != canonical_task(task):
-            saved, problem = None, "The saved report is for another task input."
-        if saved is not None and receipt is not None and (saved["source"] != receipt["source"] or saved["sha256"] != receipt["sha256"]):
-            saved, problem = None, "The saved report judges other data than the agent read with get_daily."
+        if saved is not None:
+            problem = saved_problem(saved, task, receipt, report_path(date, run))
+            saved = None if problem else saved
         put("report-saved", saved is not None, None, None, problem)
     else:
-        put("report-saved", None)
+        skip("report-saved", "this-run", "task-input")
     submitted_task = plain_task(output.task)
     entries = entries_of(output)
-    if holds_("task-input"):
-        same = task_problem(submitted_task) is None and canonical_task(submitted_task) == canonical_task(task)
-        put("submitted-task", same, task, submitted_task, "The submitted report is for another task input: submit the report the last report_alerts call returned.")
-        problem = judgement_problem(task, None, entries["alerts"], entries["unavailable"]) if same else None
-        put("submitted-shape", problem is None if same else None, None, None, f"The submitted report is malformed: {problem}")
+    if hold("task-input"):
+        problem = task_problem(submitted_task)
+        if problem:
+            put("submitted-task", False, None, None, f"The submitted report's task is malformed: {problem}. {SUBMIT}")
+        else:
+            wanted, got = canonical_task(task), canonical_task(submitted_task)
+            keys = [key for key in TASK_KEYS if got[key] != wanted[key]]
+            message = f"The submitted report is for another task: {changed_fields(got, wanted, keys)}. {SUBMIT}"
+            put("submitted-task", not keys, {key: wanted[key] for key in keys} or None, {key: got[key] for key in keys} or None, message)
+        if hold("submitted-task"):
+            problem = judgement_problem(task, None, entries["alerts"], entries["unavailable"])
+            put("submitted-shape", problem is None, None, None, f"The submitted report is malformed: {problem}")
+        else:
+            skip("submitted-shape", "submitted-task")
     else:
-        put("submitted-task", None)
-        put("submitted-shape", None)
-    if saved is not None and holds_("submitted-task", "submitted-shape"):
-        same = canonical_judgement(saved) == canonical_judgement(entries)
-        put("submitted-as-saved", same, None, None, "The submitted report differs from the saved report: submit the report the last report_alerts call returned, as it is.")
+        skip("submitted-task", "task-input")
+        skip("submitted-shape", "task-input")
+    if saved is not None and hold("submitted-task", "submitted-shape"):
+        difference = judgement_difference(canonical_judgement(saved), canonical_judgement(entries))
+        message = f"The submitted report is not the saved report {report_path(date, run)}: {difference}. {SUBMIT}"
+        put("submitted-as-saved", difference is None, counts(saved), counts(entries), message)
     else:
-        put("submitted-as-saved", None)
+        skip("submitted-as-saved", "report-saved", "submitted-task", "submitted-shape")
     if receipt is not None:
         named_data = plain_source(output.data)
-        put("names-data", named_data == receipt["source"], receipt["source"]["label"], named_data.get("label"), f"The report names other data than the agent read: {source_fields(named_data, receipt['source'])}.")
+        if named_data == receipt["source"]:
+            put("names-data", True, receipt["source"]["label"], named_data["label"])
+        else:
+            keys = [key for key in SOURCE_KEYS if named_data.get(key) != receipt["source"].get(key)]
+            message = f"The submitted report names other data than the agent read: {changed_fields(named_data, receipt['source'], keys)}."
+            put("names-data", False, {key: receipt["source"].get(key) for key in keys}, {key: named_data.get(key) for key in keys}, message)
     else:
-        put("names-data", None)
+        skip("names-data", "agent-read")
 
     # 14-21: the alerts, against the pinned data the agent read.
     expected = None
@@ -347,47 +454,35 @@ def verify_task(arguments, output, reference, workspace):
         # Diagnostic only: what the submission is worth on the data the agent itself read.
         diagnostic = expected_from_series(task, receipt["source"]["step_hours"], receipt["cities"])
         if checks["submitted-shape"]["ok"] is True:
-            score, _ = compare(diagnostic, entries)
-            details["agent_data_check"] = "against the data the agent read, the report is exact" if score == 1.0 else f"against the data the agent read, the report scores F1 {score:.2f}"
+            worth, _ = compare(diagnostic, entries)
+            details["agent_data_check"] = "against the data the agent read, the report is exact" if worth == 1.0 else f"against the data the agent read, the report scores F1 {worth:.2f}"
     coverage = None
     if saved is not None:
         examined = set(saved["examined"])
         cities = set(CITY_NAMES)
         coverage = len(examined & cities) / len(examined | cities)
         unexamined = sorted(cities - examined)
-        put("all-examined", not unexamined, len(cities), len(examined & cities), f"{len(unexamined)} cities unexamined ({named(unexamined)}): every one of the 30 must be judged.")
+        message = f"{len(unexamined)} of the 30 cities {'was' if len(unexamined) == 1 else 'were'} never examined ({named(unexamined)}): report_alerts must judge every city."
+        put("all-examined", not unexamined, len(cities), len(examined & cities), message)
     else:
-        put("all-examined", None)
+        skip("all-examined", "report-saved")
     score = None
     if expected is not None and checks["submitted-shape"]["ok"] is True:
         score, differences = compare(expected, entries)
-        messages = entry_messages(task, expected, differences, series_of, step)
-        rows = (
-            ("alerts-complete", "missing_alerts"),
-            ("no-extra-alerts", "extra_alerts"),
-            ("values-exact", "value_mismatches"),
-            ("matched-exact", "matched_mismatches"),
-            ("unavailable-complete", "missing_unavailable"),
-            ("no-extra-unavailable", "extra_unavailable"),
-            ("unavailable-exact", "unavailable_mismatches"),
-        )
-        for identifier, key in rows:
-            wrong = differences[key]
-            listed = sorted(wrong) if isinstance(wrong, dict) else list(wrong)
-            put(identifier, not wrong, [], listed, messages.get(identifier))
+        failures = alert_failures(task, expected, differences, series_of, step)
+        for identifier in ALERT_CHECKS:
+            put(identifier, identifier not in failures, *failures.get(identifier, (None, None, "")))
     else:
-        for identifier in ORDER[14:]:
-            put(identifier, None)
+        for identifier in ALERT_CHECKS:
+            skip(identifier, "agent-data", "submitted-shape")
 
     constraints = [checks[identifier] for identifier in ORDER]
-    failed = [entry for entry in constraints if entry["ok"] is False]
-    unchecked = [entry for entry in constraints if entry["ok"] is None]
-    valid = not failed and not unchecked
+    valid = all(entry["ok"] is True for entry in constraints)
     if any(checks[identifier]["ok"] is not True for identifier in GATES) or score is None:
         final = 0.0
     else:
         final = score * (coverage if coverage is not None else 0.0)
-    source = (match or receipt or {}).get("source") if (match or receipt) else None
+    source = (match or receipt or {}).get("source")
     details.update(
         constraints=constraints,
         source=source["label"] if source else None,
@@ -401,12 +496,5 @@ def verify_task(arguments, output, reference, workspace):
     if differences is not None:
         details["f1"] = round(score, 4)
     if valid:
-        message = (
-            f"All {len(constraints)} checks hold: 30 cities examined; exactly {len(expected.alerts)} alert(s) and "
-            f"{len(expected.unavailable)} unavailable from the {source['label']}."
-        )
-        return result(True, message, score=1.0, **details)
-    first = failed[0] if failed else unchecked[0]
-    count = f"{len(failed)} of {len(constraints)} checks failed" + (f", {len(unchecked)} not checked" if unchecked else "")
-    reason = first.get("message") or first["constraint"]
-    return result(False, f"{count}. First: {reason}", score=min(final, 0.99), **details)
+        return result(True, held(len(constraints), expected, source["label"]), score=1.0, **details)
+    return result(False, summary(constraints), score=min(final, 0.99), **details)

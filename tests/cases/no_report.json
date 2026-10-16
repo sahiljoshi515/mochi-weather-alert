@@ -77,6 +77,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.0,
-  "message_contains": "no report at reports/"
+  "message_contains": "report-saved: No report at reports/"
  }
 }

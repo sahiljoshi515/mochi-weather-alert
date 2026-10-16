@@ -87,6 +87,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "Extra alert"
+  "message_contains": "no-extra-alerts: Athens is reported as an alert but is not one"
  }
 }

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from contract import (
 )
 from plugin import alerts, openmeteo
 from plugin.rules import CITY_NAMES, key_of, series_sha256
+from verifier.task import TEXT
 
 GOLD_DATES = sorted({scenario["date"] for scenario in index()["scenarios"] if scenario["clock"] == index()["clock"]})
 
@@ -159,7 +161,7 @@ def test_a_report_left_by_an_earlier_task_fails_this_run_when_the_answer_key_nev
     assert later.pin.prior_runs == []
     found = later.verdict(old_report)
     assert failed(found)[0] == "this-run" and found["score"] == 0.0
-    assert "run aaaaaaaaaaaaaaaa began before this task (at 2026-10-16T03:00:20Z, before the answer key finished pinning the data at 2026-10-16T04:00:00Z)" in found["message"]
+    assert "this-run: Run aaaaaaaaaaaaaaaa began before this task (at 2026-10-16T03:00:20Z, before the answer key finished pinning the data at 2026-10-16T04:00:00Z)" in found["message"]
     later.gold()
     assert later.verdict()["valid"], "this task's own run, begun after the answer key, passes"
 
@@ -202,7 +204,7 @@ def test_a_receipt_naming_another_run_fails_agent_read_as_altered(offline) -> No
     rewrite(receipt_file(run), lambda receipt: receipt.update(run="0123456789abcdef"))
     found = run.verdict()
     assert failed(found)[0] == "agent-read"
-    assert f"the receipt reports/{alerts.RUN}/2026-07-07.source.json was altered after get_daily: it names run '0123456789abcdef'" in found["message"]
+    assert f"agent-read: The receipt reports/{alerts.RUN}/2026-07-07.source.json was altered after get_daily: it names run '0123456789abcdef'" in found["message"]
 
 
 def test_a_receipt_changed_after_get_daily_fails_agent_read(offline) -> None:
@@ -374,7 +376,7 @@ def test_no_report_fails_report_saved(offline) -> None:
     judged = scripted_judge.judge(run.task, run.daily)
     submitted = {"task": run.task, "run": run.daily["run"], "data": run.daily["source"], **judged}
     found = run.verdict(submitted)
-    assert failed(found)[0] == "report-saved" and "no report" in found["message"]
+    assert failed(found)[0] == "report-saved" and f"No report at reports/{alerts.RUN}/2026-07-07.json" in found["message"]
 
 
 def test_a_report_naming_another_run_fails_report_saved(offline) -> None:
@@ -422,19 +424,20 @@ def test_an_unexamined_half_fails_all_examined_and_costs_coverage(offline) -> No
     calls = scripted_judge.plan(run.task, run.daily)["calls"]
     report = run.report(calls[:1])["report"]
     found = run.verdict(report)
-    assert "all-examined" in failed(found) and "15 cities unexamined" in found["message"]
+    assert failed(found) == ["all-examined", "alerts-complete"]
+    assert found["message"].startswith("all-examined: 15 of the 30 cities were never examined (") and found["message"].endswith(" (+1 more)")
     assert 0 < found["score"] < 1
 
 
 @pytest.mark.parametrize(
     ("mutation", "constraint", "words"),
     [
-        ("missing_alert", "alerts-complete", "Missing alert"),
-        ("extra_alert", "no-extra-alerts", "Extra alert"),
-        ("fabricated", "values-exact", "Wrong value"),
-        ("wrong_matched", "matched-exact", "Wrong matched conditions"),
-        ("empty", "alerts-complete", "Missing alert"),
-        ("any_vs_all", "alerts-complete", "Missing alert"),
+        ("missing_alert", "alerts-complete", "is an alert but is not reported"),
+        ("extra_alert", "no-extra-alerts", "is reported as an alert but is not one"),
+        ("fabricated", "values-exact", "but get_daily gave"),
+        ("wrong_matched", "matched-exact", "matched conditions are wrong"),
+        ("empty", "alerts-complete", "is an alert but is not reported"),
+        ("any_vs_all", "alerts-complete", "is an alert but is not reported"),
     ],
 )
 def test_each_wrong_judgement_fails_its_constraint(offline, mutation: str, constraint: str, words: str) -> None:
@@ -470,7 +473,7 @@ def test_wrong_unavailable_variables_fail_unavailable_exact(offline) -> None:
     entry["variables"] = entry["variables"][:1]
     run.report(scripted_judge.halves(task, gold))
     found = run.verdict()
-    assert failed(found)[0] == "unavailable-exact" and "Wrong variables" in found["message"]
+    assert failed(found)[0] == "unavailable-exact" and ", but the report lists " in found["message"]
 
 
 def test_an_extra_unavailable_city_fails_no_extra_unavailable(offline) -> None:
@@ -493,7 +496,7 @@ def test_bankers_rounding_fails_values_exact_where_a_tie_exists(offline) -> None
     assert perth["values"]["humidity"] == 83.25
     run.report(scripted_judge.plan(task, run.daily, ["bankers"])["calls"])
     found = run.verdict()
-    assert failed(found) == ["values-exact"] and "Perth humidity 83.25 -> 83.3 (1 decimal, ties away from zero), reported 83.2" in found["message"]
+    assert failed(found) == ["values-exact"] and "Perth humidity is reported as 83.2, but get_daily gave 83.25, which is 83.3 to 1 decimal (ties away from zero)" in found["message"]
 
 
 def test_a_value_on_its_threshold_is_an_alert_for_greater_or_equal(offline) -> None:
@@ -504,6 +507,66 @@ def test_a_value_on_its_threshold_is_an_alert_for_greater_or_equal(offline) -> N
     run.report(scripted_judge.plan(run.task, run.daily, ["boundary"])["calls"])
     found = run.verdict()
     assert failed(found)[0] == "alerts-complete" and "Athens" in found["message"]
+
+
+ENTRY_KEYS = {"id", "constraint", "ok", "expected", "actual", "message"}
+
+
+def assert_plain_entries(verdict: dict) -> None:
+    """Every entry has the same keys; a failure says why, a skipped check names an earlier one that did not
+    hold, and the verdict's message is the first failure's, then how many more fail."""
+    entries = verdict["details"]["constraints"]
+    order = [entry["id"] for entry in entries]
+    for position, entry in enumerate(entries):
+        assert set(entry) == ENTRY_KEYS, entry
+        assert (entry["message"] == "") == (entry["ok"] is True), entry
+        if entry["ok"] is None:
+            blocking = entry["message"].removeprefix("Not checked: ").removesuffix(" did not hold.").split(" and ")
+            assert entry["message"].startswith("Not checked: ") and all(name in order[:position] for name in blocking), entry
+            assert any(entries[order.index(name)]["ok"] is not True for name in blocking), entry
+    wrong = [entry for entry in entries if entry["ok"] is False]
+    if wrong:
+        more = f" (+{len(wrong) - 1} more)" if len(wrong) > 1 else ""
+        assert verdict["message"] == f"{wrong[0]['id']}: {wrong[0]['message'].removesuffix('.')}{more}"
+
+
+@pytest.mark.parametrize("mutation", ["gold", "missing_alert", "extra_alert", "fabricated", "wrong_matched", "empty", "any_vs_all", "replay", "no_receipt", "unexamined"])
+def test_every_verdict_entry_has_the_same_keys_and_says_why(offline, mutation: str) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    run.read()
+    calls = scripted_judge.plan(run.task, run.daily, [] if mutation in ("gold", "replay", "no_receipt", "unexamined") else [mutation])["calls"]
+    report = run.report(calls[:1] if mutation == "unexamined" else calls)["report"]
+    if mutation == "replay":
+        report = {**report, "run": "0123456789abcdef"}
+    if mutation == "no_receipt":
+        receipt_file(run).unlink()
+    found = run.verdict(report)
+    assert_plain_entries(found)
+    assert found["valid"] == (mutation == "gold")
+
+
+def test_the_alert_checks_show_the_cities_concerned_as_expected_and_actual(offline) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    run.read()
+    gold = scripted_judge.judge(run.task, run.daily)
+    first = gold["alerts"][0]
+    variable = next(iter(first["values"]))
+    changed = {**first, "values": {**first["values"], variable: round(first["values"][variable] + 0.1, 1)}}
+    run.report(scripted_judge.halves(run.task, {**gold, "alerts": [changed] + gold["alerts"][2:]}))
+    found = run.verdict()
+    entries = {entry["id"]: entry for entry in found["details"]["constraints"]}
+    dropped = gold["alerts"][1]["city"]
+    assert (entries["alerts-complete"]["expected"], entries["alerts-complete"]["actual"]) == ([dropped], [])
+    assert entries["values-exact"]["expected"] == {first["city"]: {variable: first["values"][variable]}}
+    assert entries["values-exact"]["actual"] == {first["city"]: {variable: changed["values"][variable]}}
+    assert entries["no-extra-alerts"]["expected"] is None and entries["no-extra-alerts"]["message"] == ""
+    assert found["message"].startswith(f"alerts-complete: {dropped} is an alert but is not reported: ") and found["message"].endswith(" (+1 more)")
+
+
+def test_the_readme_lists_every_constraint_as_the_verifier_names_it() -> None:
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    rows = re.findall(r"^\| (\d+) \| `([a-z-]+)` \| ([^|]+) \| ", readme, re.MULTILINE)
+    assert [(int(number), name, text.strip()) for number, name, text in rows] == [(number, *entry) for number, entry in enumerate(TEXT.items(), 1)]
 
 
 def test_the_gate_failures_score_zero_and_the_others_score_f1(offline) -> None:
@@ -565,7 +628,11 @@ def test_the_date_check_verdict_follows_its_clock(offline) -> None:
     wrong = plain_output(answer)
     wrong["forecast_last"] = "2026-10-31"
     found = verifier.verify_task("check-date", given, build_output(wrong, DateOutput), None, ".")
-    assert not found["valid"] and found["score"] < 1 and "date range" in found["message"]
+    assert not found["valid"] and found["score"] < 1 and found["message"] == "ranges: The answer says forecast_last '2026-10-31', expected '2026-10-29'"
+    assert_plain_entries(found)
+    found = verifier.verify_task("check-date", given, build_output({**wrong, "clock": "yesterday"}, DateOutput), None, ".")
+    assert_plain_entries(found)
+    assert [entry["message"] for entry in found["details"]["constraints"]][1:] == ["Not checked: clock did not hold."] * 5
 
 
 @pytest.mark.parametrize(
@@ -645,7 +712,7 @@ def test_the_report_names_the_data_fields_that_differ(offline) -> None:
 
 
 def test_a_missing_alert_shows_the_value_get_daily_gave_beside_its_report(offline) -> None:
-    """WA-08: 'Athens has max_temp 91.94 -> report 91.9; it meets max_temp > 91.93', never the rounded value alone."""
+    """WA-08: the value get_daily gave (91.94) beside its rounded report (91.9), never the rounded value alone."""
     run = Run(task_for("2026-07-07", conditions=["max_temp > 91.93"]), offline, clock=T0)
     run.read()
     athens = next(row for row in run.daily["cities"] if row["city"] == "Athens")
@@ -654,7 +721,7 @@ def test_a_missing_alert_shows_the_value_get_daily_gave_beside_its_report(offlin
     gold["alerts"] = [entry for entry in gold["alerts"] if entry["city"] != "Athens"]
     run.report(scripted_judge.halves(run.task, gold))
     found = run.verdict()
-    assert "Missing alert Athens" in found["message"] and "max_temp 91.94 -> report 91.9; it meets max_temp > 91.93" in found["message"]
+    assert "Athens is an alert but is not reported: max_temp 91.94 meets max_temp > 91.93, so report it with max_temp 91.9" in found["message"]
 
 
 def test_negative_ties_round_away_from_zero(offline) -> None:
@@ -681,7 +748,7 @@ def test_negative_ties_round_away_from_zero(offline) -> None:
     run2.read()
     run2.report(scripted_judge.halves(task, {"alerts": wrong["alerts"], "unavailable": wrong["unavailable"]}))
     found = run2.verdict()
-    assert failed(found) == ["values-exact"] and "Athens max_temp -2.25 -> -2.3 (1 decimal, ties away from zero), reported -2.2" in found["message"]
+    assert failed(found) == ["values-exact"] and "Athens max_temp is reported as -2.2, but get_daily gave -2.25, which is -2.3 to 1 decimal (ties away from zero)" in found["message"]
 
 
 def test_rounding_the_truncated_value_equals_rounding_the_exact_one_negatives_included() -> None:

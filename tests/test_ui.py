@@ -1,6 +1,6 @@
-"""The page's renderers drawn with NanoAgent's served kit under Node (the lab's page check, plus a draw
-with a whole verdict, whose checks list the page check cannot pass), the rules module shared byte for
-byte, and ui/ holding only what NanoAgent serves."""
+"""The page's renderers drawn with NanoAgent's served kit under Node (the lab's page check, plus draws
+with the real verdicts of committed cases, whose checks list the page check cannot pass), the rules
+module shared byte for byte, and ui/ holding only what NanoAgent serves."""
 
 from __future__ import annotations
 
@@ -10,8 +10,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from replay import played
 
 ROOT = Path(__file__).resolve().parents[1]
+CASES = ROOT / "tests" / "cases"
 PAGE_CHECK = Path.home() / "mochi-dev" / "harness" / "page_check.sh"
 KIT = Path.home() / "mochi-dev" / "rushlab" / "nanoagent" / "src" / "nanoagent" / "plugin" / "page" / "kit"
 SHIM = Path.home() / "mochi-dev" / "harness" / "page" / "shim.mjs"
@@ -66,36 +68,37 @@ def test_the_page_check_draws_both_outputs(tmp_path: Path) -> None:
             assert word in completed.stdout, (word, completed.stdout[-1500:])
 
 
-@NEEDS_NODE
-def test_the_checks_list_draws_from_the_verdict(tmp_path: Path) -> None:
-    shutil.copytree(KIT, tmp_path / "kit")
-    for name in ("renderers.js", "renderers.css"):
-        shutil.copy(ROOT / "ui" / name, tmp_path / name)
-    shutil.copy(SHIM, tmp_path / "shim.mjs")
-    verdict = {
-        "valid": False,
-        "message": "1 of 21 checks failed.",
-        "details": {
-            "constraints": [
-                {"id": "answer-key", "constraint": "The answer key pinned the data for this date", "ok": True, "expected": None, "actual": None},
-                {"id": "values-exact", "constraint": "Every alert's values are exact", "ok": False, "expected": [], "actual": ["Perth"], "message": "Wrong value in Perth: humidity is 83.3, reported 83.2"},
-                {"id": "unavailable-exact", "constraint": "Every unavailable city names exactly the variables it lacks", "ok": None, "expected": None, "actual": None},
-            ]
-        },
-    }
-    (tmp_path / "sample.json").write_text(json.dumps(report()), encoding="utf-8")
-    (tmp_path / "verdict.json").write_text(json.dumps(verdict), encoding="utf-8")
-    script = """
+DRAW = """
 import "./shim.mjs";
 import { readFileSync } from "node:fs";
 const renderers = (await import("./renderers.js")).default;
 const value = JSON.parse(readFileSync("./sample.json", "utf8"));
 const verdict = JSON.parse(readFileSync("./verdict.json", "utf8"));
-const node = renderers.AlertReportOutput(value, { task: {}, verdict, send: () => {} });
+const node = renderers[process.argv[2]](value, { task: {}, verdict, send: () => {} });
 console.log(node.textContent);
 """
-    (tmp_path / "check.mjs").write_text(script, encoding="utf-8")
-    completed = subprocess.run(["node", "check.mjs"], cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False)
+
+
+@NEEDS_NODE
+@pytest.mark.parametrize(("name", "output_class"), [("gold", "AlertReportOutput"), ("fabricated_value", "AlertReportOutput"), ("unexamined", "AlertReportOutput"), ("replayed_earlier_run", "AlertReportOutput"), ("check_date_today", "DateOutput")])
+def test_the_checks_list_draws_each_real_verdict(offline, tmp_path: Path, name: str, output_class: str) -> None:
+    """A committed case's own output and verdict: every check with its id; each failure with why and, where
+    the verdict has them, what was expected against what was found; each skipped check with what it needed."""
+    verdict, output = played(json.loads((CASES / f"{name}.json").read_text(encoding="utf-8")), CASES)
+    shutil.copytree(KIT, tmp_path / "kit")
+    for file in ("renderers.js", "renderers.css"):
+        shutil.copy(ROOT / "ui" / file, tmp_path / file)
+    shutil.copy(SHIM, tmp_path / "shim.mjs")
+    (tmp_path / "sample.json").write_text(json.dumps(output), encoding="utf-8")
+    (tmp_path / "verdict.json").write_text(json.dumps(verdict), encoding="utf-8")
+    (tmp_path / "check.mjs").write_text(DRAW, encoding="utf-8")
+    completed = subprocess.run(["node", "check.mjs", output_class], cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False)
     assert completed.returncode == 0, completed.stderr
-    for words in ("Checks: 1 of 3 hold", "1 failed", "Wrong value in Perth", "Every alert's values are exact"):
-        assert words in completed.stdout, (words, completed.stdout)
+    entries = verdict["details"]["constraints"]
+    held = sum(entry["ok"] is True for entry in entries)
+    words = [f"Checks: {held} of {len(entries)} hold", *(entry["constraint"] for entry in entries), *(entry["id"] for entry in entries)]
+    words += [entry["message"] for entry in entries if entry["ok"] is not True]
+    words += ["Expected: "] if any(entry["ok"] is False and None not in (entry["expected"], entry["actual"]) for entry in entries) else []
+    for word in words:
+        assert word in completed.stdout, (word, completed.stdout)
+    assert ("Expected: " in completed.stdout) == (words[-1] == "Expected: ")

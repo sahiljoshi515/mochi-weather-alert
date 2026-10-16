@@ -87,6 +87,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "Missing alert"
+  "message_contains": "alerts-complete: Auckland is an alert but is not reported"
  }
 }

@@ -89,6 +89,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.0,
-  "message_contains": "differs from the saved report"
+  "message_contains": "submitted-as-saved: The submitted report is not the saved report"
  }
 }

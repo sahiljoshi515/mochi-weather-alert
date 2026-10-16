@@ -87,6 +87,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "Wrong matched conditions"
+  "message_contains": "matched-exact: Mumbai's matched conditions are wrong: rain > 0.5 holds"
  }
 }
