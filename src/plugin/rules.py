@@ -1,7 +1,7 @@
 """The alert rules, shared byte for byte by the server (src/plugin/rules.py) and the verifier
 (verifier/rules.py): the 30 cities, the condition grammar, the calendar, which Open-Meteo data a
 date is judged on, a local day's aggregates, the canonical form of the data both sides hash, the
-exact unit conversions and half-up rounding, and the evaluation that turns a day into an alert.
+exact unit conversions and rounding (ties away from zero), and the evaluation that turns a day into an alert.
 
 Everything here is exact arithmetic on integers, Decimal and Fraction: a comparison never sees a
 binary float, and dates are integer day and minute counts (no datetime: a verifier may not import
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from decimal import Decimal
@@ -85,7 +86,8 @@ RAIN_UNITS = ("mm", "in")
 MIN_CONDITIONS = 1
 MAX_CONDITIONS = 6
 # How many decimals get_daily gives a value in the task's units: truncated, never rounded, so comparing
-# it with a threshold of at most 2 decimals and rounding it half up to 1 decimal give the exact answers.
+# it with a threshold of at most 2 decimals and rounding it to 1 decimal (ties away from zero) give the exact
+# answers, negatives included (see round_half_up).
 GIVEN_PLACES = 9
 PLACES = 1  # reported values carry one decimal
 # ASCII digits only: "\d" would accept other scripts' digits, and dates go into URLs and file names.
@@ -183,7 +185,7 @@ class DayMetrics:
 @dataclass(frozen=True)
 class Alert:
     city: str
-    values: dict[str, Decimal]  # each needed variable, in the requested units, rounded half up to 1 decimal
+    values: dict[str, Decimal]  # each needed variable, in the requested units, to 1 decimal, ties away from zero
     matched: tuple[str, ...]  # the conditions that hold, canonical, in the order given
 
 
@@ -345,6 +347,34 @@ def choose(text: str, clock: int) -> Choice:
 
 def source_key(kind: str, model: str, run: str, step_hours: int) -> tuple[str, str, str, int]:
     return (kind, model, run, step_hours)
+
+
+ENDPOINTS = {
+    DataKind.ARCHIVE.value: "https://archive-api.open-meteo.com/v1/archive",
+    DataKind.FORECAST.value: "https://single-runs-api.open-meteo.com/v1/forecast",
+    DataKind.OUTLOOK.value: "https://seasonal-api.open-meteo.com/v1/seasonal",
+}
+
+
+def source_request(date: str, key: tuple) -> str:
+    """The one Open-Meteo request that fetches source ``key`` (kind, model, run, step) for ``date``: all 30
+    cities, in UTC, from the day before to the day after (a forecast run up to the hour that covers every
+    city's day). The answer key, the agent's tools and the verifier all derive it from here."""
+    kind, model, run, _step = key
+    day = day_number(date)
+    query = [
+        ("latitude", ",".join(city[2] for city in CITIES)),
+        ("longitude", ",".join(city[3] for city in CITIES)),
+        ("hourly", ",".join(SOURCE_VARIABLES)),
+        ("models", model),
+        ("timezone", "GMT"),
+    ]
+    if kind == DataKind.FORECAST.value:
+        hours = (day * 1440 + WINDOW_LAST_MINUTE - stamp_minutes(run)) // 60 + 1
+        query += [("run", run), ("forecast_hours", str(hours))]
+    else:
+        query += [("start_date", max(date_text(day - 1), FIRST_DAY)), ("end_date", date_text(day + 1))]
+    return ENDPOINTS[kind] + "?" + "&".join(f"{name}={value}" for name, value in query)
 
 
 def source_label(kind: str, model: str, run: str, step_hours: int) -> str:
@@ -637,7 +667,9 @@ def convert(variable: str, metric: Fraction, units: Units) -> Fraction:
 
 
 def round_half_up(value: Fraction, places: int = PLACES) -> Decimal:
-    """``value`` to ``places`` decimals, ties away from zero (Decimal's ROUND_HALF_UP), exactly."""
+    """``value`` to ``places`` decimals, ties away from zero (Decimal's ROUND_HALF_UP), exactly: 2.25 ->
+    2.3 and -2.25 -> -2.3. Being symmetric, it gives the same result on a value truncated toward zero
+    (as get_daily gives it) as on the exact value, negatives included."""
     scaled = abs(value) * 10**places
     whole = scaled.numerator // scaled.denominator
     if (scaled - whole) * 2 >= 1:
@@ -668,8 +700,8 @@ def evaluate(metrics: list[DayMetrics], conditions: list[Condition], match: str,
     A city with a missing reading for any variable the conditions use is unavailable, with those
     variables, and never an alert. Otherwise each condition is tested against the exact converted
     value; the city is an alert when every condition holds (match "all") or at least one does
-    ("any"), with each needed variable's value rounded half up to one decimal and the conditions
-    that hold.
+    ("any"), with each needed variable's value rounded to one decimal, ties away from zero, and the
+    conditions that hold.
     """
     needed = needed_variables(conditions)
     alerts: list[Alert] = []
@@ -694,6 +726,25 @@ def expected_from_series(task: dict, step_hours: int, cities: list[dict]) -> Exp
 
 
 # ----- The task, the report file and the submitted report -----
+
+# Every run (one plugin process: a task call's agent) keeps its files in its own folder, so two task calls
+# at once in one workspace never touch each other's: reports/<run>/<date>.source.json (the receipt of the
+# data read) and reports/<run>/<date>.json (the report). The run is 16 hex digits, drawn at process start.
+REPORT_DIR = "reports"
+RUN_TOKEN = re.compile(r"[0-9a-f]{16}")
+
+
+def run_folder(run: str) -> str:
+    return f"{REPORT_DIR}/{run}"
+
+
+def receipt_path(date: str, run: str) -> str:
+    return f"{REPORT_DIR}/{run}/{date}.source.json"
+
+
+def report_path(date: str, run: str) -> str:
+    return f"{REPORT_DIR}/{run}/{date}.json"
+
 
 TASK_KEYS = ("date", "match", "temperature_unit", "wind_unit", "rain_unit", "conditions")
 SOURCE_KEYS = ("kind", "model", "run", "step_hours", "today", "label")
@@ -811,9 +862,11 @@ def judgement_problem(task: dict, examined: object, alerts: object, unavailable:
         if not isinstance(alert["city"], str) or not alert["city"].strip():
             return "an alert's city must be a city name"
         city = alert["city"]
+        if city not in CITY_NAMES:
+            return f"{city!r} is not one of the 30 cities (names are spelled as the task lists them)"
         values = alert["values"]
-        if not isinstance(values, dict) or not all(key in VARIABLES and is_number(value) for key, value in values.items()):
-            return f"{city}: values must map condition variables to numbers"
+        if not isinstance(values, dict) or not all(key in VARIABLES and is_number(value) and math.isfinite(value) for key, value in values.items()):
+            return f"{city}: values must map condition variables to finite numbers"
         if set(values) != set(needed):
             return f"{city}: values must hold exactly the variables the conditions use: {', '.join(needed)}"
         if not isinstance(alert["matched"], list) or not all(isinstance(text, str) for text in alert["matched"]):
@@ -835,6 +888,8 @@ def judgement_problem(task: dict, examined: object, alerts: object, unavailable:
             return "each unavailable entry must hold city and variables"
         if not isinstance(entry["city"], str) or not entry["city"].strip():
             return "an unavailable entry's city must be a city name"
+        if entry["city"] not in CITY_NAMES:
+            return f"{entry['city']!r} is not one of the 30 cities (names are spelled as the task lists them)"
         variables = entry["variables"]
         if not isinstance(variables, list) or not variables or not all(name in needed for name in variables):
             return f"{entry['city']}: variables must name the condition variables the city lacks: {', '.join(needed)}"
@@ -850,6 +905,21 @@ def judgement_problem(task: dict, examined: object, alerts: object, unavailable:
     return None
 
 
+def canonical_judgement(judgement: dict) -> tuple[dict, dict]:
+    """A well-formed judgement's entries by city, as sets where order means nothing: each alert's values
+    as exact decimals and its matched conditions as a sorted set of canonical forms, each unavailable
+    city's variables as a sorted set."""
+    alerts = {
+        entry["city"]: (
+            {variable: Decimal(repr(float(value))) for variable, value in entry["values"].items()},
+            tuple(sorted(canonical_conditions(entry["matched"]))),
+        )
+        for entry in judgement["alerts"]
+    }
+    unavailable = {entry["city"]: tuple(sorted(entry["variables"])) for entry in judgement["unavailable"]}
+    return alerts, unavailable
+
+
 def report_problem(report: object) -> str | None:
     """What is wrong with a report file's shape (as parsed JSON), or None: the keys, a date, the run
     marker of the process that wrote it, the task, the data it judges, and well-formed lists."""
@@ -857,8 +927,8 @@ def report_problem(report: object) -> str | None:
         return "the report must hold date, run, task, source, sha256, examined, alerts and unavailable"
     if not isinstance(report["date"], str):
         return "the report's date must be a string"
-    if not isinstance(report["run"], str) or not report["run"].strip():
-        return "the report's run must be the marker of the run that wrote it"
+    if not isinstance(report["run"], str) or not RUN_TOKEN.fullmatch(report["run"]):
+        return "the report's run must be the token of the run that wrote it"
     problem = task_problem(report["task"])
     if problem:
         return f"task: {problem}"

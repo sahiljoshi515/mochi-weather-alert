@@ -39,7 +39,7 @@ def verify_output(input_value, output_value, workspace):
     date = task["date"]
     if output_value.date != date:
         return result(False, "the values are for another date")
-    receipt, problem = receipt_of(workspace, date)
+    receipt, problem = receipt_of(workspace, date, output_value.run)
     if problem:
         return result(False, problem)
     if plain_source(output_value.source) != receipt["source"]:

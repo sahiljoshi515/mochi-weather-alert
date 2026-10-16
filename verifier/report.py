@@ -4,7 +4,7 @@ judgement with the expected alerts that the task's verdict scores."""
 from decimal import Decimal
 from pathlib import Path
 
-from .checks import REPORT_DIR, entries_by_city, entries_of, read_json, result, run_of
+from .checks import entries_by_city, entries_of, read_json, result, run_problem
 from .daily import cities_problem
 from .receipt import receipt_of
 from .rules import (
@@ -15,33 +15,28 @@ from .rules import (
     judgement_problem,
     plain_source,
     plain_task,
+    report_path,
     report_problem,
     task_problem,
 )
 
 
-def report_path(date):
-    return f"{REPORT_DIR}/{date}.json"
-
-
-def saved_report(workspace, date):
-    """(the report file as JSON, None) or (None, why it is not a report of this run)."""
-    where = report_path(date)
+def saved_report(workspace, date, run):
+    """(run ``run``'s report file for ``date`` as JSON, None) or (None, why it is not one)."""
+    problem = run_problem(workspace, run)
+    if problem:
+        return None, problem
+    where = report_path(date, run)
     found, problem = read_json(Path(workspace) / where)
     if problem == "missing":
         return None, f"no report at {where}: call report_alerts for every city before submitting"
     if problem:
-        return None, f"{where} is not a report of this run: {problem}"
+        return None, f"{where} is not a report: {problem}"
     problem = report_problem(found)
     if problem:
-        return None, f"{where} is not a report of this run: {problem}"
-    run = run_of(workspace)
-    if run is None:
-        return None, "no run marker in the workspace: the plugin did not start here"
-    if found["run"] != run:
-        return None, f"{where} is not a report of this run: it was left by an earlier one"
-    if found["date"] != date:
-        return None, "the report is for another day"
+        return None, f"{where} is not a report report_alerts wrote: {problem}"
+    if found["run"] != run or found["date"] != date:
+        return None, f"{where} names run {found['run']} and date {found['date']}: it was altered after report_alerts"
     return found, None
 
 
@@ -61,12 +56,16 @@ def verify_output(input_value, output_value, workspace):
     it examined. Nothing cumulative is checked against the file: other calls may have merged since."""
     task = plain_task(input_value.task)
     date = task["date"]
-    if output_value.path != report_path(date):
-        return result(False, f"the report is not at {report_path(date)}")
-    saved, problem = saved_report(workspace, date)
+    run = output_value.report.run
+    problem = run_problem(workspace, run)
     if problem:
         return result(False, problem)
-    receipt, problem = receipt_of(workspace, date)
+    if output_value.path != report_path(date, run):
+        return result(False, f"the report is not at {report_path(date, run)}")
+    saved, problem = saved_report(workspace, date, run)
+    if problem:
+        return result(False, problem)
+    receipt, problem = receipt_of(workspace, date, run)
     if problem:
         return result(False, problem)
     if canonical_task(saved["task"]) != canonical_task(task):

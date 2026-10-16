@@ -18,12 +18,13 @@ def test_there_are_gold_wrong_and_integrity_cases() -> None:
     names = {case.stem for case in CASES}
     assert {"gold", "gold_1940", "gold_dst_santiago", "gold_seam_era5", "gold_seam_ifs", "boundary", "bankers_rounding", "extra_alert", "missing_alert"} <= names
     assert {"unexamined", "divergent_submission", "no_report", "tampered_receipt", "wrong_data_label", "refused_date", "check_date_today"} <= names
+    assert {"replayed_earlier_run", "unknown_city_alert", "matched_reordered"} <= names
 
 
 @pytest.mark.parametrize("case_file", CASES, ids=[case.stem for case in CASES])
 def test_each_case_gets_its_verdict(offline, case_file: Path) -> None:
     case = json.loads(case_file.read_text(encoding="utf-8"))
-    problems = matches(replay(case), case["expect"])
+    problems = matches(replay(case, case_file.parent), case["expect"])
     assert not problems, problems
 
 

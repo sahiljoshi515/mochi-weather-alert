@@ -4,10 +4,8 @@ forms of the contract instances the rules work on. Pure functions of their argum
 import json
 from pathlib import Path
 
-from .rules import SOURCE_VARIABLES, plain_source
+from .rules import RUN_TOKEN, SOURCE_VARIABLES, plain_source, run_folder
 
-# The report and receipt live in the run's folder, which is the member's own folder for this plugin.
-REPORT_DIR = "reports"
 RUN_MARKER = "run.json"
 MOST = 10  # list entries a constraint's expected or actual shows
 
@@ -53,11 +51,15 @@ def read_json(path):
         return None, "not JSON"
 
 
-def run_of(workspace):
-    """The run marker the plugin process wrote at its start (reports/run.json), or None."""
-    found, problem = read_json(Path(workspace) / REPORT_DIR / RUN_MARKER)
-    run = found.get("run") if isinstance(found, dict) and not problem else None
-    return run if isinstance(run, str) and run.strip() else None
+def run_problem(workspace, run):
+    """What is wrong with ``run`` as a run of this workspace, or None: its token's form (checked before
+    it names any path) and its folder's marker."""
+    if not isinstance(run, str) or not RUN_TOKEN.fullmatch(run):
+        return f"{run!r} is not a run token (16 hex digits): submit the report report_alerts returned"
+    found, problem = read_json(Path(workspace) / run_folder(run) / RUN_MARKER)
+    if problem or not isinstance(found, dict) or found.get("run") != run:
+        return f"this workspace has no run {run}: submit the report report_alerts returned"
+    return None
 
 
 def plain_city(city):

@@ -1,9 +1,14 @@
-"""The daily-alert verdict: 21 constraints, in order, on the answer key, the data the agent read, the
-saved and submitted report, and the alerts themselves. The verdict is valid only when every one holds;
-any failure among the first 13 (the data and the report's integrity) scores 0, otherwise the score is
-the F1 of the reported alert and unavailable cities, scaled by the share of cities examined."""
+"""The daily-alert verdict: 21 constraints, in order, on the answer key, the run the submission names,
+the data that run's agent read, the saved and submitted report, and the alerts themselves. The verdict
+is valid only when every one holds; any failure among the first 13 (the data and the report's
+integrity) scores 0, otherwise the score is the F1 of the reported alert and unavailable cities,
+scaled by the share of cities examined.
 
-from .checks import compact, constraint, entries_by_city, entries_of, plain_candidate, result, run_of
+Every file the verdict reads is the named run's own (reports/<run>/), so two task calls at once in one
+workspace are judged apart; the run must have begun after the answer key (it is not among the runs the
+answer key saw in the workspace), so a report left by an earlier task never passes for this one."""
+
+from .checks import compact, constraint, entries_of, plain_candidate, result, run_problem
 from .pin import pin_problems
 from .receipt import receipt_of
 from .report import compare, saved_report
@@ -12,7 +17,10 @@ from .rules import (
     DELTA_MINUTES,
     SOURCE_OF,
     SOURCE_VARIABLES,
+    DataKind,
     Units,
+    canonical_judgement,
+    canonical_number,
     canonical_task,
     convert,
     day_metrics,
@@ -36,11 +44,11 @@ TEXT = {
     "task-input": "The task input is a valid date and 1 to 6 conditions",
     "answer-key-data": "The answer key's data is well formed: every city's local day, its readings and their hash",
     "answer-key-rules": "The answer key used the data the date rules choose at its clock",
-    "run-marker": "The plugin marked this run in the workspace",
-    "agent-read": "The agent read this date's data with get_daily in this run",
+    "this-run": "The report names a run of this task: one that began after the answer key",
+    "agent-read": "That run's agent read this date's data with get_daily",
     "agent-source": "The agent read a source the answer key pinned",
     "agent-data": "The agent's data is the pinned data, reading for reading",
-    "report-saved": "report_alerts saved this run's report for this task, on the data the agent read",
+    "report-saved": "report_alerts saved that run's report for this task, on the data the agent read",
     "submitted-task": "The submitted report is for the task input",
     "submitted-shape": "The submitted report is well formed",
     "submitted-as-saved": "The submitted report is the saved report, unchanged",
@@ -48,7 +56,7 @@ TEXT = {
     "all-examined": "All 30 cities were examined",
     "alerts-complete": "Every city whose day meets the rules is reported as an alert",
     "no-extra-alerts": "No city is reported as an alert that is not one",
-    "values-exact": "Every alert's values are exact: the task's units, rounded half up to 1 decimal",
+    "values-exact": "Every alert's values are exact: the task's units, rounded to 1 decimal, ties away from zero",
     "matched-exact": "Every alert's matched conditions are exactly those that hold",
     "unavailable-complete": "Every city missing a reading a condition needs is reported unavailable",
     "no-extra-unavailable": "No city that has its readings is reported unavailable",
@@ -57,6 +65,7 @@ TEXT = {
 ORDER = tuple(TEXT)
 GATES = ORDER[:13]  # the data and the report's integrity: any failure scores 0
 MOST_NAMED = 3  # cities a failure message names
+CHANGING = (DataKind.ARCHIVE.value, DataKind.OUTLOOK.value)  # sources Open-Meteo may update; a forecast run never changes
 
 
 def first_gap(series, variable, step_hours):
@@ -81,8 +90,14 @@ def first_difference(pinned, read):
         for variable in SOURCE_VARIABLES:
             for time, now, then in zip(series["times"], series[variable], other[variable], strict=True):
                 if now != then:
-                    return f"{series['city']} {variable} at {time}Z was {then} when pinned and {now} when read"
+                    return f"{series['city']} {variable} at {time}Z is {then} in the pinned data and {now} in the receipt"
     return "the readings differ"
+
+
+def given(task, series, step_hours, variable):
+    """The value get_daily gives a city for a variable (exact, cut to 9 decimals), as its shortest text."""
+    units = Units(task["temperature_unit"], task["wind_unit"], task["rain_unit"])
+    return canonical_number(truncate(convert(variable, exact_metric(day_metrics(series, step_hours), variable), units)))
 
 
 def why_not_alert(task, series, step_hours):
@@ -97,7 +112,7 @@ def why_not_alert(task, series, step_hours):
     for condition in conditions:
         value = convert(condition.variable, exact_metric(day, condition.variable), units)
         if not holds(value, condition):
-            reasons.append(f"{condition.variable} {truncate(value)} is not {condition.op} {condition.threshold}")
+            reasons.append(f"{condition.variable} {canonical_number(truncate(value))} is not {condition.op} {condition.threshold}")
     rule = "every condition must hold" if task["match"] == "all" else "no condition holds"
     return f"{series['city']} is no alert ({rule}): {'; '.join(reasons[:2])}"
 
@@ -108,26 +123,29 @@ def named(cities):
 
 
 def entry_messages(task, expected, differences, series_of, step_hours):
-    """Plain messages for the alert constraints (15 to 21), each naming the first cities concerned."""
+    """Plain messages for the alert constraints (15 to 21), each naming the first cities concerned and
+    showing a value as get_daily gave it beside its rounded report (91.94 -> 91.9)."""
     alerts = {alert.city: alert for alert in expected.alerts}
     conditions = parse_conditions(task["conditions"])
-    units = Units(task["temperature_unit"], task["wind_unit"], task["rain_unit"])
     messages = {}
     if differences["missing_alerts"]:
         cities = differences["missing_alerts"]
         first = alerts[cities[0]]
-        values = ", ".join(f"{name} {value}" for name, value in first.values.items())
-        messages["alerts-complete"] = f"Missing alert {named(cities)}: {cities[0]} has {values} and meets {', '.join(first.matched)}"
+        series = series_of[cities[0]]
+        values = ", ".join(f"{name} {given(task, series, step_hours, name)} -> report {value}" for name, value in first.values.items())
+        messages["alerts-complete"] = f"Missing alert {named(cities)}: {cities[0]} has {values}; it meets {', '.join(first.matched)}"
     if differences["extra_alerts"]:
         cities = differences["extra_alerts"]
-        messages["no-extra-alerts"] = f"Extra alert {named(cities)}: {why_not_alert(task, series_of[cities[0]], step_hours)}"
+        series = series_of.get(cities[0])
+        reason = why_not_alert(task, series, step_hours) if series else f"{cities[0]!r} is not one of the 30 cities"
+        messages["no-extra-alerts"] = f"Extra alert {named(cities)}: {reason}"
     if differences["value_mismatches"]:
         city, wrong = next(iter(differences["value_mismatches"].items()))
         variable, values = next(iter(wrong.items()))
-        exact = truncate(convert(variable, exact_metric(day_metrics(series_of[city], step_hours), variable), units))
+        exact = given(task, series_of[city], step_hours, variable)
         messages["values-exact"] = (
-            f"Wrong value in {named(sorted(differences['value_mismatches']))}: {city} {variable} is {values['expected']} "
-            f"(exact {exact}, rounded half up), reported {values['reported']}"
+            f"Wrong value in {named(sorted(differences['value_mismatches']))}: {city} {variable} {exact} -> {values['expected']} "
+            f"(1 decimal, ties away from zero), reported {values['reported']}"
         )
     if differences["matched_mismatches"]:
         city, both = next(iter(differences["matched_mismatches"].items()))
@@ -145,6 +163,54 @@ def entry_messages(task, expected, differences, series_of, step_hours):
         city, both = next(iter(differences["unavailable_mismatches"].items()))
         messages["unavailable-exact"] = f"Wrong variables for {named(sorted(differences['unavailable_mismatches']))}: {city} lacks {both['expected']}, reported {both['reported']}"
     return messages
+
+
+def source_mismatch(receipt, candidates, pinned_at):
+    """Why the agent's source is none the answer key pinned, in words: it read late, or a run was
+    published (or not yet published for the agent) between the two fetches. Always: run again."""
+    read = receipt["source"]
+    labels = [candidate["source"]["label"] for candidate in candidates]
+    head = f"The agent read the {read['label']}; the answer key pinned the {' and the '.join(labels)}."
+    gap = stamp_minutes(receipt["clock"]) + DELTA_MINUTES - pinned_at
+    if gap > DELTA_MINUTES:
+        return f"{head} The agent read {gap} min after the answer key, more than the {DELTA_MINUTES} min allowed: run again."
+    runs = [candidate["source"]["run"] for candidate in candidates if candidate["source"]["kind"] == DataKind.FORECAST.value]
+    if read["kind"] == DataKind.FORECAST.value and runs:
+        if read["run"] < min(runs):
+            missed = ", ".join(sorted(set(receipt["skipped"]) & set(runs))) or max(runs)
+            return f"{head} The agent's fetch could not get run {missed} (not yet published completely when it read), so it read the older run {read['run']}: run again."
+        if read["run"] > max(runs):
+            return f"{head} Open-Meteo published run {read['run']} between the answer key's fetch and the agent's: run again."
+    return f"{head} The date rules chose differently between the two readings: run again."
+
+
+def data_mismatch(match, receipt):
+    """(why the agent's data differs from the pinned data of the same source, whether to run again)."""
+    difference = first_difference(match, receipt)
+    kind = receipt["source"]["kind"]
+    if kind not in CHANGING:
+        message = (
+            f"The receipt's data differs from the pinned data of the same forecast run ({difference}); a run's data "
+            "never changes, so the receipt was altered after get_daily."
+        )
+        return message, False
+    if receipt["fetched_at"] < match["fetched_at"]:
+        message = (
+            f"The receipt's data differs from the pinned data ({difference}), and it says the agent fetched before the "
+            "answer key did: the receipt was altered after get_daily."
+        )
+        return message, False
+    message = (
+        f"The data the agent read differs from the pinned data of the same request ({difference}). The "
+        f"{receipt['source']['label']} can be updated upstream between two fetches: run again."
+    )
+    return message, True
+
+
+def source_fields(named_data, read):
+    """The data source fields the submission gives differently from the receipt, in words."""
+    keys = [key for key in ("kind", "model", "run", "step_hours", "today", "label") if named_data.get(key) != read.get(key)]
+    return "; ".join(f"{key} {named_data.get(key)!r} instead of {read.get(key)!r}" for key in keys)
 
 
 def verify_task(arguments, output, reference, workspace):
@@ -178,29 +244,26 @@ def verify_task(arguments, output, reference, workspace):
         put("answer-key-data", None)
         put("answer-key-rules", None)
 
-    # 5-8: the data the agent read.
-    run = run_of(workspace)
-    put("run-marker", run is not None, None, None, "No run marker in the workspace: the plugin did not start here.")
+    # 5-8: the run the submission names, and the data its agent read.
+    run = output.run
+    problem = run_problem(workspace, run)
+    if problem is None and reference is not None and run in reference.prior_runs:
+        problem = f"run {run} began before this task (it was in the workspace when the answer key was pinned): submit the report this task's report_alerts returned"
+    put("this-run", problem is None, None, run, problem)
     receipt = None
-    if holds_("run-marker", "task-input"):
-        receipt, problem = receipt_of(workspace, date)
+    if holds_("this-run", "task-input"):
+        receipt, problem = receipt_of(workspace, date, run)
         put("agent-read", receipt is not None, None, receipt["source"]["label"] if receipt else None, problem)
     else:
         put("agent-read", None)
     match = None
     if receipt is not None and holds_("answer-key-data", "answer-key-rules"):
-        labels = [candidate["source"]["label"] for candidate in candidates]
         found = [candidate for candidate in candidates if key_of(candidate["source"]) == key_of(receipt["source"])]
         message = None
         if not found:
-            pinned_at = stamp_minutes(reference.clock)
-            gap = stamp_minutes(receipt["clock"]) + DELTA_MINUTES - pinned_at
-            message = f"The agent read the {receipt['source']['label']}; the answer key pinned the {' and the '.join(labels)}."
-            if gap > DELTA_MINUTES:
-                message += f" The agent read {gap} min after the answer key, more than the {DELTA_MINUTES} min allowed: run again."
-            else:
-                message += " Open-Meteo published a newer run between the two fetches: run again."
-        put("agent-source", bool(found), labels, receipt["source"]["label"], message)
+            details["rerun"] = True
+            message = source_mismatch(receipt, candidates, stamp_minutes(reference.clock))
+        put("agent-source", bool(found), [candidate["source"]["label"] for candidate in candidates], receipt["source"]["label"], message)
         match = found[0] if found else None
     else:
         put("agent-source", None)
@@ -208,19 +271,16 @@ def verify_task(arguments, output, reference, workspace):
         identical = match["sha256"] == receipt["sha256"]
         message = None
         if not identical:
-            details["rerun"] = True
-            message = (
-                f"The data changed upstream between the answer key's fetch and the agent's: {first_difference(match, receipt)}. "
-                "Nothing the agent did; run again."
-            )
+            message, rerun = data_mismatch(match, receipt)
+            details["rerun"] = details["rerun"] or rerun
         put("agent-data", identical, match["sha256"][:16], receipt["sha256"][:16], message)
     else:
         put("agent-data", None)
 
     # 9-13: the saved and the submitted report.
     saved = None
-    if holds_("run-marker", "task-input"):
-        saved, problem = saved_report(workspace, date)
+    if holds_("this-run", "task-input"):
+        saved, problem = saved_report(workspace, date, run)
         if saved is not None and canonical_task(saved["task"]) != canonical_task(task):
             saved, problem = None, "The saved report is for another task input."
         if saved is not None and receipt is not None and (saved["source"] != receipt["source"] or saved["sha256"] != receipt["sha256"]):
@@ -239,13 +299,13 @@ def verify_task(arguments, output, reference, workspace):
         put("submitted-task", None)
         put("submitted-shape", None)
     if saved is not None and holds_("submitted-task", "submitted-shape"):
-        same = entries_by_city(saved) == entries_by_city(entries)
+        same = canonical_judgement(saved) == canonical_judgement(entries)
         put("submitted-as-saved", same, None, None, "The submitted report differs from the saved report: submit the report the last report_alerts call returned, as it is.")
     else:
         put("submitted-as-saved", None)
     if receipt is not None:
         named_data = plain_source(output.data)
-        put("names-data", named_data == receipt["source"], receipt["source"]["label"], named_data.get("label"), f"The report names the {named_data.get('label')}; the agent read the {receipt['source']['label']}.")
+        put("names-data", named_data == receipt["source"], receipt["source"]["label"], named_data.get("label"), f"The report names other data than the agent read: {source_fields(named_data, receipt['source'])}.")
     else:
         put("names-data", None)
 

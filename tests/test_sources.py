@@ -11,7 +11,7 @@ from conftest import T0
 from fakes import index, recorded
 
 from plugin import openmeteo, sources
-from plugin.rules import WINDOW_LAST_MINUTE, cities_problem, day_number, series_sha256, stamp_minutes
+from plugin.rules import cities_problem, series_sha256
 
 
 def at(text: str) -> datetime:
@@ -19,7 +19,7 @@ def at(text: str) -> datetime:
 
 
 def run_url(run: str, date: str) -> str:
-    return openmeteo.run_url(run, (day_number(date) * 1440 + WINDOW_LAST_MINUTE - stamp_minutes(run)) // 60 + 1)
+    return openmeteo.run_url(run, date)
 
 
 def test_an_archive_day_pins_one_source_with_every_city(offline) -> None:
@@ -59,14 +59,23 @@ def test_the_agent_reads_ten_minutes_behind_and_once_per_date(offline) -> None:
     assert len(offline.urls) == 1
 
 
-def test_a_date_past_the_outlook_is_refused_and_ten_minutes_before_the_seventh_too(offline) -> None:
+def test_a_date_past_the_outlook_is_refused(offline) -> None:
     with pytest.raises(ValueError, match="the last day the ECMWF seasonal outlook covers"):
         sources.pin("2027-05-01")
+
+
+def test_a_date_that_came_into_range_minutes_ago_is_refused_with_when_to_run_again(offline) -> None:
+    """WA-03: on the 7th the outlook gains a month at 00:00 UTC; for ten minutes the agent's tools (which
+    read the clock ten minutes behind) would refuse the new month, so the answer key refuses it first."""
     offline.clock = lambda: at("2026-10-07T00:05:00+00:00")
+    with pytest.raises(ValueError, match=r"came into range only in the last 10 minutes .* run again after 2026-10-07T00:15 UTC"):
+        sources.pin("2027-04-15")
+    offline.clock = lambda: at("2026-10-07T00:11:00+00:00")
     _, found = sources.pin("2027-04-15")
     assert len(found) == 1 and found[0].key[0] == "outlook"
-    with pytest.raises(ValueError, match="2027-03-31"):
-        sources.read("2027-04-15")
+    sources.CACHE.clear()
+    offline.clock = lambda: at("2026-10-07T00:12:00+00:00")
+    assert sources.read("2027-04-15").key[0] == "outlook", "an agent reading after the answer key is never refused"
 
 
 def test_an_unpublished_run_falls_back_to_the_next_newest(offline) -> None:

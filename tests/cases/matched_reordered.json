@@ -1,5 +1,5 @@
 {
- "note": "An earlier run's complete report sits in the folder: the first call replaces it.",
+ "note": "The submission lists each alert's matched conditions in another order: the same report.",
  "task": "daily-alert",
  "arguments": {
   "date": "2026-07-07",
@@ -15,9 +15,6 @@
   ]
  },
  "steps": [
-  {
-   "python": "(workspace / 'reports').mkdir(exist_ok=True); (workspace / 'reports' / '2026-07-07.json').write_text(json.dumps({'date': '2026-07-07', 'run': 'an-earlier-run', 'examined': []}))"
-  },
   {
    "tool": "get_daily",
    "arguments": {
@@ -82,8 +79,11 @@
    "save_as": "last"
   },
   {
+   "python": "sub = dict(outputs['last']['report']); sub['alerts'] = [{**entry, 'matched': list(reversed(entry['matched']))} for entry in sub['alerts']]; outputs['sub'] = sub"
+  },
+  {
    "tool": "submit",
-   "arguments": "$ref:last.report"
+   "arguments": "$ref:sub"
   }
  ],
  "expect": {

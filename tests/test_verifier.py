@@ -27,7 +27,7 @@ from contract import (
     ReportInput,
 )
 from plugin import alerts, openmeteo
-from plugin.rules import CITY_NAMES, WINDOW_LAST_MINUTE, day_number, stamp_minutes
+from plugin.rules import CITY_NAMES, key_of, series_sha256
 
 GOLD_DATES = sorted({scenario["date"] for scenario in index()["scenarios"] if scenario["clock"] == index()["clock"]})
 
@@ -100,42 +100,104 @@ def test_a_pin_on_data_the_rules_do_not_choose_fails_answer_key_rules(offline) -
     assert failed(found)[0] == "answer-key-rules" and "breaks the date rules" in found["message"]
 
 
-def test_a_missing_run_marker_fails_run_marker(offline) -> None:
-    run = Run(task_for("2026-07-07"), offline, clock=T0)
-    run.gold()
-    (run.workspace / "reports" / "run.json").unlink()
-    found = run.verdict()
-    assert failed(found)[0] == "run-marker" and found["score"] == 0.0
+def receipt_file(run: Run, date: str = "2026-07-07") -> Path:
+    return run.folder / f"{date}.source.json"
 
 
-def test_a_receipt_from_an_earlier_run_fails_agent_read(offline) -> None:
+def rewrite(path: Path, change) -> None:
+    data = json.loads(path.read_text())
+    change(data)
+    path.write_text(json.dumps(data))
+
+
+def test_a_submission_naming_no_run_of_this_workspace_fails_this_run(offline) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    report = run.gold()
+    for token, words in (("0123456789abcdef", "no run 0123456789abcdef"), ("../../etc", "is not a run token"), ("", "is not a run token")):
+        found = run.verdict({**report, "run": token})
+        assert failed(found)[0] == "this-run" and words in found["message"] and found["score"] == 0.0
+
+
+def test_a_report_left_by_an_earlier_task_fails_this_run(offline, monkeypatch) -> None:
+    """An earlier task's complete, correct report in the folder is not this task's: the answer key saw its
+    run, so submitting it (a replay) fails, while this task's own run passes."""
+    task = task_for("2026-07-07")
+    monkeypatch.setattr(alerts, "RUN", "aaaaaaaaaaaaaaaa")
+    earlier = Run(task, offline, clock=T0)
+    old_report = earlier.gold()
+    assert earlier.verdict()["valid"]
+    monkeypatch.setattr(alerts, "RUN", "bbbbbbbbbbbbbbbb")
+    later = Run(task, offline, clock=T0, workspace=earlier.workspace)
+    assert later.pin.prior_runs == ["aaaaaaaaaaaaaaaa"]
+    found = later.verdict(old_report)
+    assert failed(found)[0] == "this-run" and "began before this task" in found["message"] and found["score"] == 0.0
+    later.gold()
+    assert later.verdict()["valid"]
+
+
+def test_a_receipt_naming_another_run_fails_agent_read_as_altered(offline) -> None:
     run = Run(task_for("2026-07-07"), offline, clock=T0)
     run.gold()
-    path = run.workspace / "reports" / "2026-07-07.source.json"
-    receipt = json.loads(path.read_text())
-    receipt["run"] = "0123456789abcdef"
-    path.write_text(json.dumps(receipt))
+    rewrite(receipt_file(run), lambda receipt: receipt.update(run="0123456789abcdef"))
     found = run.verdict()
-    assert failed(found)[0] == "agent-read" and "earlier run" in found["message"]
+    assert failed(found)[0] == "agent-read" and "the receipt was altered after get_daily" in found["message"]
 
 
 def test_a_receipt_changed_after_get_daily_fails_agent_read(offline) -> None:
     run = Run(task_for("2026-07-07"), offline, clock=T0)
     run.gold()
-    path = run.workspace / "reports" / "2026-07-07.source.json"
-    receipt = json.loads(path.read_text())
-    receipt["cities"][0]["temperature_2m"][0] += 1
-    path.write_text(json.dumps(receipt))
+    rewrite(receipt_file(run), lambda receipt: receipt["cities"][0]["temperature_2m"].__setitem__(0, receipt["cities"][0]["temperature_2m"][0] + 1))
     found = run.verdict()
-    assert failed(found)[0] == "agent-read" and "its own sha256" in found["message"]
+    assert failed(found)[0] == "agent-read" and "the receipt was altered after get_daily: its readings no longer match its own sha256" in found["message"]
+
+
+def test_a_receipt_whose_request_is_not_its_sources_fails_agent_read(offline) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    run.gold()
+    rewrite(receipt_file(run), lambda receipt: receipt.update(request=receipt["request"].replace("models=ecmwf_ifs", "models=best_match")))
+    found = run.verdict()
+    assert failed(found)[0] == "agent-read" and "its request is not the one that fetches" in found["message"]
 
 
 def test_no_receipt_fails_agent_read(offline) -> None:
     run = Run(task_for("2026-07-07"), offline, clock=T0)
     run.gold()
-    (run.workspace / "reports" / "2026-07-07.source.json").unlink()
+    receipt_file(run).unlink()
     found = run.verdict()
     assert failed(found)[0] == "agent-read" and "never read" in found["message"]
+
+
+def rehash(run: Run, date: str, change) -> None:
+    """Edit the receipt's readings and fix every hash that names them, as a careful forger would."""
+    path = receipt_file(run, date)
+    receipt = json.loads(path.read_text())
+    change(receipt)
+    receipt["sha256"] = series_sha256(date, key_of(receipt["source"]), receipt["cities"])
+    path.write_text(json.dumps(receipt))
+    report = run.folder / f"{date}.json"
+    rewrite(report, lambda saved: saved.update(sha256=receipt["sha256"]))
+
+
+def test_a_rehashed_forecast_receipt_is_called_altered_without_run_again(offline) -> None:
+    run = Run(task_for("2026-10-17"), offline, clock=T0)
+    run.gold()
+    rehash(run, "2026-10-17", lambda receipt: receipt["cities"][0]["temperature_2m"].__setitem__(3, receipt["cities"][0]["temperature_2m"][3] + 3.0))
+    found = run.verdict()
+    assert failed(found) == ["agent-data"], found["message"]
+    assert "a run's data never changes, so the receipt was altered after get_daily" in found["message"]
+    assert found["details"]["rerun"] is False and "upstream" not in found["message"]
+
+
+def test_an_archive_receipt_claiming_a_fetch_before_the_answer_key_is_called_altered(offline) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    run.gold()
+    def change(receipt):
+        receipt["cities"][0]["temperature_2m"][3] = 9.0
+        receipt["fetched_at"] = "2000-01-01T00:00:00Z"
+    rehash(run, "2026-07-07", change)
+    found = run.verdict()
+    assert failed(found) == ["agent-data"] and "fetched before the answer key did: the receipt was altered" in found["message"]
+    assert found["details"]["rerun"] is False
 
 
 def test_data_that_changed_upstream_between_the_fetches_fails_agent_data_with_run_again(offline) -> None:
@@ -149,7 +211,7 @@ def test_data_that_changed_upstream_between_the_fetches_fails_agent_data_with_ru
     run.gold()
     found = run.verdict()
     assert failed(found) == ["agent-data"], found["message"]
-    assert "changed upstream" in found["message"] and "run again" in found["message"] and "Athens temperature_2m" in found["message"]
+    assert "can be updated upstream between two fetches: run again" in found["message"] and "Athens temperature_2m" in found["message"]
     assert found["details"]["rerun"] is True and found["score"] == 0.0
     assert found["details"]["agent_data_check"] == "against the data the agent read, the report is exact"
 
@@ -167,10 +229,8 @@ def test_an_agent_reading_a_source_the_answer_key_never_pinned_fails_agent_sourc
     clock = datetime.fromisoformat("2026-10-15T15:05:00+00:00")
     task = task_for("2026-10-17")
     stand_in = recorded(next(url for url in index()["answers"] if "run=2026-10-15T18:00" in url))["body"]
-    day = day_number("2026-10-17")
     for run in ("2026-10-15T00:00", "2026-10-15T06:00", "2026-10-15T12:00"):
-        hours = (day * 1440 + WINDOW_LAST_MINUTE - stamp_minutes(run)) // 60 + 1
-        offline.overrides[openmeteo.run_url(run, hours)] = stand_in
+        offline.overrides[openmeteo.run_url(run, "2026-10-17")] = stand_in
     run = Run(task, offline, clock=clock, agent_after=timedelta(hours=6, minutes=5))
     assert [candidate.source.run for candidate in run.pin.candidates] == ["2026-10-15T00:00", "2026-10-15T06:00"]
     run.gold()
@@ -178,6 +238,25 @@ def test_an_agent_reading_a_source_the_answer_key_never_pinned_fails_agent_sourc
     found = run.verdict()
     assert failed(found)[0] == "agent-source", found["message"]
     assert "more than the 10 min allowed" in found["message"] and "run again" in found["message"]
+    assert found["details"]["rerun"] is True
+
+
+def test_an_agent_that_could_not_get_the_newer_run_reads_the_older_with_its_own_message(offline) -> None:
+    # Pinned at 15:05: runs 00 and 06 UTC. The agent, nine minutes later, reads 10 minutes behind (14:54):
+    # the rules choose run 00. Here the agent's fetch of 00 fails (not published for it), so it reads 18 UTC
+    # of the day before, which the answer key never pinned.
+    clock = datetime.fromisoformat("2026-10-15T15:05:00+00:00")
+    task = task_for("2026-10-16")
+    stand_in = recorded(next(url for url in index()["answers"] if "run=2026-10-15T00:00" in url))["body"]
+    newest = openmeteo.run_url("2026-10-15T00:00", "2026-10-16")
+    offline.overrides[newest] = Turns(stand_in, {"status": 400, "reason": "The requested model run is not available."})
+    offline.overrides[openmeteo.run_url("2026-10-14T18:00", "2026-10-16")] = stand_in
+    run = Run(task, offline, clock=clock, agent_after=timedelta(minutes=1))
+    run.gold()
+    assert run.daily["source"]["run"] == "2026-10-14T18:00"
+    found = run.verdict()
+    assert failed(found)[0] == "agent-source" and "could not get run 2026-10-15T00:00" in found["message"]
+    assert "older run 2026-10-14T18:00: run again" in found["message"] and found["details"]["rerun"] is True
 
 
 def test_an_agent_reading_within_ten_minutes_reads_a_pinned_run(offline) -> None:
@@ -197,20 +276,17 @@ def test_no_report_fails_report_saved(offline) -> None:
     run = Run(task_for("2026-07-07"), offline, clock=T0)
     run.read()
     judged = scripted_judge.judge(run.task, run.daily)
-    submitted = {"task": run.task, "data": run.daily["source"], **judged}
+    submitted = {"task": run.task, "run": run.daily["run"], "data": run.daily["source"], **judged}
     found = run.verdict(submitted)
     assert failed(found)[0] == "report-saved" and "no report" in found["message"]
 
 
-def test_a_report_left_by_an_earlier_run_fails_report_saved(offline) -> None:
+def test_a_report_naming_another_run_fails_report_saved(offline) -> None:
     run = Run(task_for("2026-07-07"), offline, clock=T0)
     run.gold()
-    path = run.workspace / "reports" / "2026-07-07.json"
-    report = json.loads(path.read_text())
-    report["run"] = "fedcba9876543210"
-    path.write_text(json.dumps(report))
+    rewrite(run.folder / "2026-07-07.json", lambda report: report.update(run="fedcba9876543210"))
     found = run.verdict()
-    assert failed(found)[0] == "report-saved" and "earlier one" in found["message"]
+    assert failed(found)[0] == "report-saved" and "altered after report_alerts" in found["message"]
 
 
 def test_a_submission_for_another_task_fails_submitted_task(offline) -> None:
@@ -321,7 +397,7 @@ def test_bankers_rounding_fails_values_exact_where_a_tie_exists(offline) -> None
     assert perth["values"]["humidity"] == 83.25
     run.report(scripted_judge.plan(task, run.daily, ["bankers"])["calls"])
     found = run.verdict()
-    assert failed(found) == ["values-exact"] and "Perth humidity is 83.3 (exact 83.250000000, rounded half up), reported 83.2" in found["message"]
+    assert failed(found) == ["values-exact"] and "Perth humidity 83.25 -> 83.3 (1 decimal, ties away from zero), reported 83.2" in found["message"]
 
 
 def test_a_value_on_its_threshold_is_an_alert_for_greater_or_equal(offline) -> None:
@@ -408,3 +484,138 @@ def test_the_date_check_names_each_kind_of_data(offline, date: str, kind: str | 
     if kind is None:
         assert "cannot be judged" in answer.message
         assert ("2027-04-30" if date > "2027" else "before 1940-01-01") in answer.source
+
+
+# ----- The challenger's findings, each pinned by a test -----
+
+
+@pytest.mark.parametrize("name", ["Atlantis", "mexico city", "Athens ", " Oslo", "Aardvark"])
+@pytest.mark.parametrize("where", ["alerts", "unavailable"])
+def test_a_city_outside_the_thirty_is_an_invalid_verdict_not_a_crash(offline, name: str, where: str) -> None:
+    """WA-02: an unknown, miscased or space-padded city in the submission is a plain invalid verdict."""
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    report = copy.deepcopy(run.gold())
+    if where == "alerts":
+        report["alerts"].append({"city": name, "values": dict(report["alerts"][0]["values"]), "matched": list(report["alerts"][0]["matched"])})
+    else:
+        report["unavailable"].append({"city": name, "variables": ["max_temp"]})
+    found = run.verdict(report)
+    assert not found["valid"] and found["score"] == 0.0
+    assert failed(found)[0] == "submitted-shape" and f"{name!r} is not one of the 30 cities" in found["message"]
+
+
+def test_the_report_names_the_data_fields_that_differ(offline) -> None:
+    """WA-07: names-data says which field differs, not the same label twice."""
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    report = run.gold()
+    found = run.verdict({**report, "data": {**report["data"], "today": "2026-10-15"}})
+    assert failed(found) == ["names-data"] and "today '2026-10-15' instead of '2026-10-16'" in found["message"]
+    found = run.verdict({**report, "data": {**report["data"], "model": "era5"}})
+    assert "model 'era5' instead of 'ecmwf_ifs'" in found["message"]
+
+
+def test_a_missing_alert_shows_the_value_get_daily_gave_beside_its_report(offline) -> None:
+    """WA-08: 'Athens has max_temp 91.94 -> report 91.9; it meets max_temp > 91.93', never the rounded value alone."""
+    run = Run(task_for("2026-07-07", conditions=["max_temp > 91.93"]), offline, clock=T0)
+    run.read()
+    athens = next(row for row in run.daily["cities"] if row["city"] == "Athens")
+    assert athens["values"]["max_temp"] == 91.94
+    gold = scripted_judge.judge(run.task, run.daily)
+    gold["alerts"] = [entry for entry in gold["alerts"] if entry["city"] != "Athens"]
+    run.report(scripted_judge.halves(run.task, gold))
+    found = run.verdict()
+    assert "Missing alert Athens" in found["message"] and "max_temp 91.94 -> report 91.9; it meets max_temp > 91.93" in found["message"]
+
+
+def test_negative_ties_round_away_from_zero(offline) -> None:
+    """WA-09: a value of exactly -2.25 is reported -2.3 (ties away from zero); -2.2 fails values-exact."""
+    task = task_for("2026-07-07", temperature_unit="C", conditions=["max_temp < 0"])
+    url = recorded_url(offline, task)
+    body = copy.deepcopy(recorded(url)["body"])
+    hourly = body[0]["hourly"]  # Athens, every reading -2.25 °C
+    hourly["temperature_2m"] = [-2.25] * len(hourly["temperature_2m"])
+    offline.overrides[url] = body
+    run = Run(task, offline, clock=T0)
+    run.read()
+    athens = next(row for row in run.daily["cities"] if row["city"] == "Athens")
+    assert athens["values"]["max_temp"] == -2.25
+    gold = scripted_judge.judge(task, run.daily)
+    assert next(entry for entry in gold["alerts"] if entry["city"] == "Athens")["values"]["max_temp"] == -2.3
+    run.report(scripted_judge.halves(task, gold))
+    assert run.verdict()["valid"]
+    wrong = copy.deepcopy(run.last["report"])
+    for entry in wrong["alerts"]:
+        if entry["city"] == "Athens":
+            entry["values"]["max_temp"] = -2.2
+    run2 = Run(task, offline, clock=T0)
+    run2.read()
+    run2.report(scripted_judge.halves(task, {"alerts": wrong["alerts"], "unavailable": wrong["unavailable"]}))
+    found = run2.verdict()
+    assert failed(found) == ["values-exact"] and "Athens max_temp -2.25 -> -2.3 (1 decimal, ties away from zero), reported -2.2" in found["message"]
+
+
+def test_rounding_the_truncated_value_equals_rounding_the_exact_one_negatives_included() -> None:
+    """WA-09: ties away from zero is symmetric, so truncating toward zero first never changes the report."""
+    import random
+    from fractions import Fraction
+
+    from plugin.rules import round_half_up, truncate
+
+    randomly = random.Random(9)
+    for _ in range(20000):
+        tie = Fraction(randomly.randint(-5000, 5000), 10) + Fraction(1, 20)
+        value = tie + Fraction(randomly.randint(-10**4, 10**4), 10**13)  # within 1e-9 of a tie
+        assert round_half_up(Fraction(truncate(value))) == round_half_up(value), value
+    assert str(round_half_up(Fraction("-2.25"))) == "-2.3" and str(round_half_up(Fraction("2.25"))) == "2.3"
+
+
+def test_a_submission_with_reordered_lists_is_still_the_saved_report(offline) -> None:
+    """WA-10: matched conditions and unavailable variables are compared as sets, like the alert checks."""
+    task = task_for("1940-01-01", temperature_unit="C", rain_unit="mm", conditions=["max_temp >= 25", "rain > 1", "humidity >= 0", "wind >= 0"])
+    run = Run(task, offline, clock=T0)
+    report = copy.deepcopy(run.gold())
+    reordered = 0
+    for entry in report["alerts"]:
+        if len(entry["matched"]) > 1:
+            entry["matched"].reverse()
+            reordered += 1
+    for entry in report["unavailable"]:
+        if len(entry["variables"]) > 1:
+            entry["variables"].reverse()
+            reordered += 1
+    assert reordered
+    found = run.verdict(report)
+    assert found["valid"], found["message"]
+
+
+def test_no_submission_makes_the_verdict_raise(offline) -> None:
+    """WA-02's audit: random malformed submissions and workspaces always give a verdict, never an exception."""
+    import random
+
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    report = run.gold()
+    randomly = random.Random(3)
+    names = [*CITY_NAMES[:5], "Atlantis", "", " ", "athens", "Athens\n"]
+    for _ in range(300):
+        broken = copy.deepcopy(report)
+        choice = randomly.randrange(8)
+        if choice == 0:
+            broken["alerts"].append({"city": randomly.choice(names), "values": {"max_temp": randomly.choice([float("nan"), float("inf"), 1e308, -0.0])}, "matched": ["max_temp >= 95"]})
+        elif choice == 1:
+            broken["unavailable"].append({"city": randomly.choice(names), "variables": randomly.choice([[], ["x"], ["max_temp", "max_temp"]])})
+        elif choice == 2 and broken["alerts"]:
+            broken["alerts"][0]["matched"] = randomly.choice([[], ["nonsense"], ["max_temp >= 95", "max_temp>=95"], ["rain > 0.500"]])
+        elif choice == 3:
+            broken["run"] = randomly.choice(["", "../..", "x" * 16, "0" * 16, alerts.RUN.upper()])
+        elif choice == 4:
+            broken["data"] = {**broken["data"], randomly.choice(["kind", "run", "today", "label"]): randomly.choice(["", "outlook", "2026-13-01"])} if randomly.random() < 0.5 else broken["data"]
+            if broken["data"]["kind"] not in ("archive", "forecast", "outlook"):
+                broken["data"]["kind"] = "archive"
+        elif choice == 5:
+            broken["task"] = {**broken["task"], "conditions": randomly.choice([["max_temp >= 95"], ["bad"], ["max_temp >= 95", "max_temp >= 95.0"]])}
+        elif choice == 6:
+            broken["alerts"] = broken["alerts"] * 2
+        else:
+            broken["unavailable"] = [{"city": name, "variables": ["max_temp"]} for name in CITY_NAMES]
+        found = run.verdict(broken)
+        assert isinstance(found["valid"], bool) and 0.0 <= found["score"] <= 1.0

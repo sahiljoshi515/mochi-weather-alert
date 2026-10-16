@@ -92,7 +92,7 @@ def cases() -> dict[str, dict]:
         ),
         "bankers_rounding": run_case(
             task("2026-07-07", conditions=["humidity >= 80"]), ["bankers"],
-            {"valid": False, "score_max": 0.99, "message_contains": "Perth humidity is 83.3 (exact 83.250000000, rounded half up), reported 83.2"},
+            {"valid": False, "score_max": 0.99, "message_contains": "Perth humidity 83.25 -> 83.3 (1 decimal, ties away from zero), reported 83.2"},
             "Half-even rounding: Perth's mean humidity is exactly 83.25.",
         ),
         "missing_alert": run_case(july, ["missing_alert"], {"valid": False, "score_max": 0.99, "message_contains": "Missing alert"}, "The first alert city left out."),
@@ -123,13 +123,13 @@ def cases() -> dict[str, dict]:
         "note": "The submission names other data than the agent read.",
         "task": "daily-alert", "arguments": july,
         "steps": [read_step(july), judge_step(july), *report_steps(), {"python": "sub = dict(outputs['last']['report']); sub['data'] = {**sub['data'], 'model': 'era5', 'label': 'ERA5 reanalysis (ECMWF), hourly'}; outputs['sub'] = sub"}, {"tool": "submit", "arguments": "$ref:sub"}],
-        "expect": {"valid": False, "score_max": 0.0, "message_contains": "the agent read the ECMWF IFS archive"},
+        "expect": {"valid": False, "score_max": 0.0, "message_contains": "model 'era5' instead of 'ecmwf_ifs'"},
     }  # fmt: skip
     found["no_report"] = {
         "note": "Judged, but never reported: the submission is typed in.",
         "task": "daily-alert", "arguments": july,
-        "steps": [read_step(july), judge_step(july, extra="outputs['sub'] = {'task': TASK, 'data': outputs['daily']['source'], **judge(TASK, outputs['daily'])}"), {"tool": "submit", "arguments": "$ref:sub"}],
-        "expect": {"valid": False, "score_max": 0.0, "message_contains": "no report at reports/2026-07-07.json"},
+        "steps": [read_step(july), judge_step(july, extra="outputs['sub'] = {'task': TASK, 'run': outputs['daily']['run'], 'data': outputs['daily']['source'], **judge(TASK, outputs['daily'])}"), {"tool": "submit", "arguments": "$ref:sub"}],
+        "expect": {"valid": False, "score_max": 0.0, "message_contains": "no report at reports/"},
     }  # fmt: skip
     found["report_before_reading"] = {
         "note": "report_alerts before get_daily is refused; the run then reads and reports properly.",
@@ -140,13 +140,31 @@ def cases() -> dict[str, dict]:
     found["tampered_receipt"] = {
         "note": "The receipt of the data read is changed behind the tools' back.",
         "task": "daily-alert", "arguments": july,
-        "steps": [read_step(july), judge_step(july), *report_steps(), {"python": "path = workspace / 'reports' / '2026-07-07.source.json'; receipt = json.loads(path.read_text()); receipt['cities'][0]['temperature_2m'][0] += 1; path.write_text(json.dumps(receipt))"}, SUBMIT_LAST],
-        "expect": {"valid": False, "score_max": 0.0, "message_contains": "does not match its own sha256"},
+        "steps": [read_step(july), judge_step(july), *report_steps(), {"python": "path = workspace / 'reports' / outputs['daily']['run'] / '2026-07-07.source.json'; receipt = json.loads(path.read_text()); receipt['cities'][0]['temperature_2m'][0] += 1; path.write_text(json.dumps(receipt))"}, SUBMIT_LAST],
+        "expect": {"valid": False, "score_max": 0.0, "message_contains": "the receipt was altered after get_daily: its readings no longer match its own sha256"},
     }  # fmt: skip
-    found["stale_report_replaced"] = {
-        "note": "An earlier run's complete report sits in the folder: the first call replaces it.",
+    found["earlier_run_in_folder"] = {
+        "note": "An earlier task's complete run sits in the member's folder: this run works in its own folder and passes.",
+        "task": "daily-alert", "arguments": july, "agent_folder": "folders/earlier_run.tar",
+        "steps": [read_step(july), judge_step(july), *report_steps(), SUBMIT_LAST],
+        "expect": GOLD,
+    }  # fmt: skip
+    found["replayed_earlier_run"] = {
+        "note": "The agent submits an earlier task's complete, correct report for the same task instead of doing the work.",
+        "task": "daily-alert", "arguments": july, "agent_folder": "folders/earlier_run.tar",
+        "steps": [{"python": f"saved = json.loads((workspace / 'reports' / {EARLIER!r} / '2026-07-07.json').read_text()); outputs['sub'] = {{'task': saved['task'], 'run': saved['run'], 'data': saved['source'], 'alerts': saved['alerts'], 'unavailable': saved['unavailable']}}"}, {"tool": "submit", "arguments": "$ref:sub"}],
+        "expect": {"valid": False, "score_max": 0.0, "message_contains": "began before this task"},
+    }  # fmt: skip
+    found["unknown_city_alert"] = {
+        "note": "The submission adds an alert for a city that is not one of the 30.",
         "task": "daily-alert", "arguments": july,
-        "steps": [{"python": "(workspace / 'reports').mkdir(exist_ok=True); (workspace / 'reports' / '2026-07-07.json').write_text(json.dumps({'date': '2026-07-07', 'run': 'an-earlier-run', 'examined': []}))"}, read_step(july), judge_step(july), *report_steps(), SUBMIT_LAST],
+        "steps": [read_step(july), judge_step(july), *report_steps(), {"python": "sub = dict(outputs['last']['report']); first = sub['alerts'][0]; sub['alerts'] = sub['alerts'] + [{'city': 'Atlantis', 'values': dict(first['values']), 'matched': list(first['matched'])}]; outputs['sub'] = sub"}, {"tool": "submit", "arguments": "$ref:sub"}],
+        "expect": {"valid": False, "score_max": 0.0, "message_contains": "'Atlantis' is not one of the 30 cities"},
+    }  # fmt: skip
+    found["matched_reordered"] = {
+        "note": "The submission lists each alert's matched conditions in another order: the same report.",
+        "task": "daily-alert", "arguments": july,
+        "steps": [read_step(july), judge_step(july), *report_steps(), {"python": "sub = dict(outputs['last']['report']); sub['alerts'] = [{**entry, 'matched': list(reversed(entry['matched']))} for entry in sub['alerts']]; outputs['sub'] = sub"}, {"tool": "submit", "arguments": "$ref:sub"}],
         "expect": GOLD,
     }  # fmt: skip
     found["refused_date"] = {
@@ -164,6 +182,46 @@ def cases() -> dict[str, dict]:
     return found
 
 
+EARLIER = "a1b2c3d4e5f60718"  # the earlier task's run token in folders/earlier_run.tar
+
+
+def earlier_run_tar(fake, clock) -> None:
+    """folders/earlier_run.tar: the reports/ folder an earlier, correct run of the gold task left, built
+    with the real tools from the recorded answers (its run token fixed)."""
+    import io
+    import tarfile
+    import tempfile
+
+    from helpers import Run
+
+    from plugin import alerts
+
+    real = alerts.RUN
+    alerts.RUN = EARLIER
+    try:
+        run = Run(task("2026-07-07"), fake, clock=clock)
+        run.gold()
+    finally:
+        alerts.RUN = real
+    folder = CASES / "folders"
+    folder.mkdir(parents=True, exist_ok=True)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for path in sorted((run.workspace / "reports").rglob("*")):
+            if path.name == "calls.log":
+                continue
+            info = archive.gettarinfo(str(path), arcname=str(path.relative_to(run.workspace)))
+            info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+            info.mode = 0o755 if path.is_dir() else 0o644
+            if path.is_dir():
+                archive.addfile(info)
+            else:
+                with path.open("rb") as handle:
+                    archive.addfile(info, handle)
+    (folder / "earlier_run.tar").write_bytes(buffer.getvalue())
+    del tempfile
+
+
 def main() -> None:
     from datetime import datetime
 
@@ -178,9 +236,10 @@ def main() -> None:
     CASES.mkdir(parents=True, exist_ok=True)
     for old in CASES.glob("*.json"):
         old.unlink()
+    earlier_run_tar(fake, clock)
     built = cases()
     for name, case in built.items():
-        found = replay(case)
+        found = replay(case, CASES)
         problems = matches(found, case["expect"])
         if problems:
             raise SystemExit(f"{name}: {problems}")

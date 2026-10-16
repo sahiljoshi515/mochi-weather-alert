@@ -81,6 +81,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.99,
-  "message_contains": "Perth humidity is 83.3 (exact 83.250000000, rounded half up), reported 83.2"
+  "message_contains": "Perth humidity 83.25 -> 83.3 (1 decimal, ties away from zero), reported 83.2"
  }
 }

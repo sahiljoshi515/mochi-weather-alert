@@ -89,6 +89,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.0,
-  "message_contains": "the agent read the ECMWF IFS archive"
+  "message_contains": "model 'era5' instead of 'ecmwf_ifs'"
  }
 }

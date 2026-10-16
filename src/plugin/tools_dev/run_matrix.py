@@ -68,11 +68,14 @@ def main() -> int:
     parser.add_argument("--pause", type=float, default=8.0)
     parser.add_argument("--out", default=None)
     parser.add_argument("--committed", nargs="*", default=[])
+    parser.add_argument("--live", nargs="*", default=None, help="only these live cases (names without the live_ prefix); default all")
     args = parser.parse_args()
     now = datetime.now(UTC)
     out = Path(args.out or HOME / "mochi-dev/runs/weather-alert" / f"matrix-{now:%Y%m%dT%H%MZ}")
     (out / "cases").mkdir(parents=True, exist_ok=True)
     cases = matrix(day_number(now.date().isoformat()))
+    if args.live is not None:
+        cases = {name: case for name, case in cases.items() if name.removeprefix("live_") in args.live}
     for name in args.committed:
         cases[name] = json.loads((ROOT / "tests" / "cases" / f"{name}.json").read_text(encoding="utf-8"))
     results = []
@@ -80,6 +83,10 @@ def main() -> int:
         path = out / "cases" / f"{name}.json"
         path.write_text(json.dumps(case, indent=1) + "\n", encoding="utf-8")
         started = time.perf_counter()
+        if case.get("agent_folder"):  # a committed case's folder, next to the copy
+            source = ROOT / "tests" / "cases" / case["agent_folder"]
+            (path.parent / case["agent_folder"]).parent.mkdir(parents=True, exist_ok=True)
+            (path.parent / case["agent_folder"]).write_bytes(source.read_bytes())
         completed = subprocess.run(
             [args.python, args.harness, str(ROOT), str(path), "--sandbox", args.sandbox, "--out", str(out / name)],
             capture_output=True, text=True, check=False,

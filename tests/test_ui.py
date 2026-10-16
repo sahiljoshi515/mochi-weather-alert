@@ -30,6 +30,7 @@ def report() -> dict:
     case = json.loads((ROOT / "tests" / "cases" / "gold.json").read_text(encoding="utf-8"))
     return {
         "task": case["arguments"],
+        "run": "a1b2c3d4e5f60718",
         "data": {"kind": "archive", "model": "ecmwf_ifs", "run": "", "step_hours": 1, "today": "2026-10-16", "label": "ECMWF IFS archive (analysis), hourly"},
         "alerts": [
             {"city": "Dubai", "values": {"max_temp": 101.3, "rain": 0.0, "wind": 9.4, "humidity": 50.7}, "matched": ["max_temp >= 95"]},

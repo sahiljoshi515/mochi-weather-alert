@@ -10,17 +10,16 @@ import gzip
 import json
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 
-from plugin.rules import CITIES, SOURCE_VARIABLES
+from plugin.rules import CITIES, ENDPOINTS, SOURCE_VARIABLES, source_request
 
-ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
-SINGLE_RUN = "https://single-runs-api.open-meteo.com/v1/forecast"
-SEASONAL = "https://seasonal-api.open-meteo.com/v1/seasonal"
+ARCHIVE = ENDPOINTS["archive"]
+SINGLE_RUN = ENDPOINTS["forecast"]
+SEASONAL = ENDPOINTS["outlook"]
 HOSTS = ("archive-api.open-meteo.com", "single-runs-api.open-meteo.com", "seasonal-api.open-meteo.com")
 USER_AGENT = "nanoagent-weather-alert/0.4.0 (+https://github.com/sahiljoshi515/mochi-weather-alert)"
 UNITS = {"temperature_2m": "°C", "relative_humidity_2m": "%", "precipitation": "mm", "wind_speed_10m": "km/h"}
@@ -42,32 +41,6 @@ class Response:
     url: str
     locations: list[dict]  # one per city, in CITIES order
     date: datetime | None  # the server's Date header
-
-
-def common(model: str) -> dict[str, str]:
-    return {
-        "latitude": ",".join(city[2] for city in CITIES),
-        "longitude": ",".join(city[3] for city in CITIES),
-        "hourly": ",".join(SOURCE_VARIABLES),
-        "models": model,
-        "timezone": "GMT",
-    }
-
-
-def url(base: str, query: dict[str, str]) -> str:
-    return f"{base}?{urllib.parse.urlencode(query, safe=',:')}"
-
-
-def archive_url(model: str, start_date: str, end_date: str) -> str:
-    return url(ARCHIVE, {**common(model), "start_date": start_date, "end_date": end_date})
-
-
-def run_url(run: str, forecast_hours: int) -> str:
-    return url(SINGLE_RUN, {**common("ecmwf_ifs"), "run": run, "forecast_hours": str(forecast_hours)})
-
-
-def outlook_url(start_date: str, end_date: str) -> str:
-    return url(SEASONAL, {**common("ecmwf_seas5_ensemble_mean"), "start_date": start_date, "end_date": end_date})
 
 
 def decoded(body: bytes, encoding: str | None) -> bytes:
@@ -100,6 +73,11 @@ def checked(url_: str, found: object) -> list[dict]:
         if not isinstance(hourly.get("time"), list) or any(len(hourly.get(name) or []) != len(hourly["time"]) for name in SOURCE_VARIABLES):
             raise RuntimeError(f"Open-Meteo's answer for {city[0]} lacks a variable's readings")
     return locations
+
+
+def run_url(run: str, date: str) -> str:
+    """The request for forecast run ``run`` covering ``date``."""
+    return source_request(date, ("forecast", "ecmwf_ifs", run, 1))
 
 
 def get(url_: str) -> Response:

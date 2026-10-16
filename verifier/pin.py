@@ -3,6 +3,7 @@
 from .checks import plain_candidate, result
 from .rules import (
     DELTA_MINUTES,
+    RUN_TOKEN,
     SHA256,
     choice_problem,
     cities_problem,
@@ -13,6 +14,7 @@ from .rules import (
     plain_task,
     series_sha256,
     source_problem,
+    source_request,
     stamp_minutes,
     task_problem,
 )
@@ -37,6 +39,8 @@ def candidate_shape_problem(task, candidate):
         return f"a pinned source's today, {source['today']}, is not its clock's date"
     if not isinstance(candidate["sha256"], str) or not SHA256.fullmatch(candidate["sha256"]):
         return "a pinned source must carry the sha256 of its data"
+    if candidate["request"] != source_request(task["date"], key_of(source)):
+        return f"the pinned {source['label']} was not fetched with the request that fetches it for {task['date']}"
     problem = cities_problem(task["date"], source["step_hours"], candidate["cities"])
     if problem:
         return problem
@@ -64,6 +68,8 @@ def pin_problems(task, pin):
     clock = stamp_minutes(pin.clock)
     if clock is None:
         return "the answer key's clock must be a UTC time", None
+    if list(pin.prior_runs) != sorted(set(pin.prior_runs)) or not all(RUN_TOKEN.fullmatch(run) for run in pin.prior_runs):
+        return "the answer key's prior runs must be distinct run tokens, sorted", None
     candidates = [plain_candidate(candidate) for candidate in pin.candidates]
     if not 1 <= len(candidates) <= 2:
         return "the answer key must pin one or two sources", None

@@ -4,6 +4,7 @@ report calls, and the verdict, with the clocks and answers a test chooses."""
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,17 +27,24 @@ def task_for(date: str, **changes) -> dict:
 class Run:
     """One run's pieces: the pin, the agent's workspace, its get_daily answer, and the verdict."""
 
-    def __init__(self, task: dict, fake, *, clock: datetime, agent_after: timedelta = timedelta(seconds=20)) -> None:
+    def __init__(self, task: dict, fake, *, clock: datetime, agent_after: timedelta = timedelta(seconds=20), workspace: Path | None = None) -> None:
         self.task = task
         self.fake = fake
-        self.workspace = Path(tempfile.mkdtemp(prefix="weather-run-"))
+        self.workspace = workspace or Path(tempfile.mkdtemp(prefix="weather-run-"))
         fake.clock = lambda: clock
         sources.CACHE.clear()
-        self.pin = alerts.pin_alerts(build_output(task, AlertInput), Path(tempfile.mkdtemp(prefix="weather-ref-")))
+        # The answer key works in a copy of the workspace, as the site stages it.
+        scratch = Path(tempfile.mkdtemp(prefix="weather-ref-"))
+        shutil.copytree(self.workspace, scratch, dirs_exist_ok=True)
+        self.pin = alerts.pin_alerts(build_output(task, AlertInput), scratch)
         fake.clock = lambda: clock + agent_after
-        alerts.write_run_marker(self.workspace)
         self.daily = None
         self.last = None
+
+    @property
+    def folder(self) -> Path:
+        """This run's folder in the workspace (the plugin process's run, alerts.RUN)."""
+        return self.workspace / "reports" / alerts.RUN
 
     def read(self, cities=None) -> dict:
         given = {"task": self.task, "cities": list(cities or CITY_NAMES)}

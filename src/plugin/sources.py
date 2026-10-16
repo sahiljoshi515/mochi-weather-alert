@@ -1,11 +1,11 @@
 """The data a date is judged on, fetched for all 30 cities.
 
 The answer key (pin_alerts) reads the clock once and applies the date rules at two readings, now minus
-DELTA_MINUTES and now, pinning one source, or two when the rules choose differently. The agent's tools
-apply them at now minus DELTA_MINUTES, which always falls between the two as long as the agent reads
-within DELTA_MINUTES of the answer key; they fetch once per date per process, so every call of a run
-sees the same data. A forecast falls back down its runs, newest first, when Open-Meteo has not
-published one (completely).
+DELTA_MINUTES and now, pinning one source, or two when the rules choose differently; it accepts a date
+only when both readings allow it. The agent's tools apply the rules at now minus DELTA_MINUTES, which
+always falls between the two as long as the agent reads within DELTA_MINUTES of the answer key; they
+fetch once per date per process, so every call of a run sees the same data. A forecast falls back down
+its runs, newest first, when Open-Meteo has not published one (completely).
 """
 
 from __future__ import annotations
@@ -19,18 +19,16 @@ from plugin import days, openmeteo
 from plugin.rules import (
     CITIES,
     DELTA_MINUTES,
-    FIRST_DAY,
     SOURCE_VARIABLES,
-    WINDOW_LAST_MINUTE,
     Choice,
     DataKind,
     choose,
     cities_problem,
     date_text,
-    day_number,
     series_sha256,
     source_key,
     source_label,
+    source_request,
     stamp_minutes,
     stamp_text,
     stamps_inside,
@@ -148,13 +146,11 @@ def fetched(choice: Choice, clock: int, run: str, response: openmeteo.Response, 
 def fetch(choice: Choice, clock: int) -> Fetched:
     """The data ``choice`` names, for every city: an archive or outlook request, or the newest
     candidate forecast run Open-Meteo has published completely."""
-    date = day_number(choice.date)
     if choice.kind == DataKind.FORECAST.value:
         skipped: list[str] = []
         for run in choice.runs:
-            hours = (date * 1440 + WINDOW_LAST_MINUTE - stamp_minutes(run)) // 60 + 1
             try:
-                response = openmeteo.get(openmeteo.run_url(run, hours))
+                response = openmeteo.get(source_request(choice.date, source_key(choice.kind, choice.model, run, choice.step_hours)))
             except openmeteo.NotPublished:
                 skipped.append(run)
                 continue
@@ -166,11 +162,7 @@ def fetch(choice: Choice, clock: int) -> Fetched:
             f"Open-Meteo has not published ECMWF IFS run {choice.runs[0]} UTC completely, nor an earlier run "
             f"covering {choice.date}; try again later"
         )
-    first = max(date_text(date - 1), FIRST_DAY)
-    if choice.kind == DataKind.ARCHIVE.value:
-        response = openmeteo.get(openmeteo.archive_url(choice.model, first, date_text(date + 1)))
-    else:
-        response = openmeteo.get(openmeteo.outlook_url(first, date_text(date + 1)))
+    response = openmeteo.get(source_request(choice.date, source_key(choice.kind, choice.model, "", choice.step_hours)))
     return fetched(choice, clock, "", response, [])
 
 
@@ -180,10 +172,18 @@ def pin(date: str) -> tuple[int, list[Fetched]]:
     latest = epoch_minutes(now())
     readings = [latest - DELTA_MINUTES, latest]
     choices = [choose(date, reading) for reading in readings]
-    usable = [(reading, choice) for reading, choice in zip(readings, choices, strict=True) if not choice.problem]
-    if not usable:
-        raise ValueError(choices[-1].problem)
-    if len(usable) == 2 and same(usable[0][1], usable[1][1]):
+    if choices[1].problem:
+        raise ValueError(choices[1].problem)
+    if choices[0].problem:
+        # The allowed range only grows with time (the outlook gains a month on the 7th): the date came into
+        # range within the last DELTA_MINUTES, so the agent's tools, which read the clock that much behind,
+        # would still refuse it. Refuse it here instead, saying when it works.
+        raise ValueError(
+            f"{date} came into range only in the last {DELTA_MINUTES} minutes (the seasonal outlook reaches a month "
+            f"further on the 7th of each month): run again after {stamp_text(latest + DELTA_MINUTES)} UTC."
+        )
+    usable = list(zip(readings, choices, strict=True))
+    if same(usable[0][1], usable[1][1]):
         usable = usable[1:]
     with ThreadPoolExecutor(max_workers=len(usable)) as pool:
         found = list(pool.map(lambda pair: fetch(pair[1], pair[0]), usable))

@@ -1,12 +1,19 @@
 """The tools: the answer key, a day's values for the agent (with the receipt of the data it read), the
-merged report, and the date check."""
+merged report, and the date check.
+
+Each run (this plugin process: one task call's agent) keeps its files in its own folder,
+reports/<run>/, so two task calls at once in one workspace never touch each other's files: the
+receipt of the data read (<date>.source.json), the report (<date>.json) and the call log (calls.log).
+"""
 
 from __future__ import annotations
 
 import json
 import os
 import secrets
+import shutil
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -35,6 +42,8 @@ from plugin.rules import (
     CITY_NAMES,
     MAX_CITIES_PER_CALL,
     MAX_REPORT_ENTRIES,
+    REPORT_DIR,
+    RUN_TOKEN,
     Units,
     canonical_task,
     choose,
@@ -46,7 +55,10 @@ from plugin.rules import (
     judgement_problem,
     parse_conditions,
     plain_task,
+    receipt_path,
+    report_path,
     report_problem,
+    run_folder,
     source_label,
     stamp_text,
     task_problem,
@@ -54,24 +66,19 @@ from plugin.rules import (
     windows_of,
 )
 
-# Reports live in the run's folder, which is the member's own folder for this plugin.
-REPORT_DIR = "reports"
 RUN_MARKER = "run.json"
-# Every tool call of every run, one JSON line each, kept short: what a run did when its agent went wrong.
+# Every tool call of the run, one JSON line each, kept short: what a run did when its agent went wrong.
 CALL_LOG = "calls.log"
 CALL_LOG_LINES = 300
-# This plugin process's run: the server records it in the workspace at its start, and every report and
-# receipt carries it, so a file left by an earlier run is never taken for this run's.
+# Run folders kept, this run's included: older ones are pruned, but never one under an hour old (it
+# may still be running).
+KEEP_RUNS = 30
+PRUNE_AFTER_SECONDS = 3600
+# This plugin process's run: its folder's name, carried by every receipt and report it writes and by
+# the submitted report, so the verifier judges exactly this run's files.
 RUN = secrets.token_hex(8)
 LOCK = threading.Lock()
-
-
-def report_path(date: str) -> str:
-    return f"{REPORT_DIR}/{date}.json"
-
-
-def receipt_path(date: str) -> str:
-    return f"{REPORT_DIR}/{date}.source.json"
+STARTED = datetime.now(UTC)
 
 
 def checked_task(given: AlertInput) -> dict:
@@ -112,12 +119,22 @@ def pinned_source(task: dict, found: sources.Fetched) -> PinnedSource:
     )
 
 
+def runs_in(workspace: Path) -> list[str]:
+    """The runs whose folders are in the workspace's reports/."""
+    folder = workspace.resolve() / REPORT_DIR
+    if not folder.is_dir():
+        return []
+    return sorted(path.name for path in folder.iterdir() if path.is_dir() and RUN_TOKEN.fullmatch(path.name))
+
+
 def pin_alerts(given: AlertInput, workspace: Path) -> PinOutput:
     """The answer key: the data the date rules choose at the clock and DELTA_MINUTES before it (one
-    source, or two when they differ), every city's local day in it, and the alerts the rules give."""
+    source, or two when they differ), every city's local day in it, the alerts the rules give, and the
+    runs already in the workspace (this task's run starts after the answer key, so it is none of them)."""
     task = checked_task(given)
     clock, found = sources.pin(task["date"])
-    return PinOutput(date=task["date"], clock=stamp_text(clock), candidates=[pinned_source(task, one) for one in found])
+    prior = [run for run in runs_in(workspace) if run != RUN]
+    return PinOutput(date=task["date"], clock=stamp_text(clock), candidates=[pinned_source(task, one) for one in found], prior_runs=prior)
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -127,9 +144,44 @@ def write_atomic(path: Path, text: str) -> None:
     os.replace(temp, path)
 
 
+def started_of(folder: Path) -> float:
+    """When a run folder's run started (epoch seconds), from its marker, else the folder's mtime."""
+    try:
+        found = json.loads((folder / RUN_MARKER).read_text(encoding="utf-8"))
+        return datetime.fromisoformat(found["started"]).timestamp()
+    except (OSError, ValueError, KeyError, TypeError):
+        try:
+            return folder.stat().st_mtime
+        except OSError:
+            return time.time()
+
+
+def prune(workspace: Path) -> None:
+    """Remove the oldest run folders past KEEP_RUNS, never one younger than PRUNE_AFTER_SECONDS: the member's
+    folder would otherwise grow with every run (the site stops saving it back past 5,000 entries)."""
+    base = workspace.resolve() / REPORT_DIR
+    others = [base / run for run in runs_in(workspace) if run != RUN]
+    if len(others) < KEEP_RUNS:
+        return
+    others.sort(key=started_of)
+    now = time.time()
+    for folder in others[: len(others) - KEEP_RUNS + 1]:
+        if now - started_of(folder) > PRUNE_AFTER_SECONDS:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def ensure_run_folder(workspace: Path) -> Path:
+    """This run's folder, reports/<run>/, made with its marker on first use (pruning old runs then)."""
+    folder = workspace.resolve() / run_folder(RUN)
+    if not (folder / RUN_MARKER).is_file():
+        folder.mkdir(parents=True, exist_ok=True)
+        write_atomic(folder / RUN_MARKER, json.dumps({"run": RUN, "started": STARTED.isoformat(timespec="seconds")}, indent=2) + "\n")
+        prune(workspace)
+    return folder
+
+
 def write_receipt(workspace: Path, found: sources.Fetched) -> None:
     """Record the data this run's agent read, for the verifier to match against the answer key."""
-    path = workspace.resolve() / receipt_path(found.date)
     receipt = {
         "run": RUN,
         "date": found.date,
@@ -142,10 +194,8 @@ def write_receipt(workspace: Path, found: sources.Fetched) -> None:
         "cities": list(found.cities),
     }
     with LOCK:
-        if not marker_is_current(workspace):
-            write_run_marker(workspace)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_atomic(path, json.dumps(receipt, separators=(",", ":")) + "\n")
+        ensure_run_folder(workspace)
+        write_atomic(workspace.resolve() / receipt_path(found.date, RUN), json.dumps(receipt, separators=(",", ":")) + "\n")
 
 
 def get_daily(given: DailyInput, workspace: Path) -> DailyOutput:
@@ -170,30 +220,7 @@ def get_daily(given: DailyInput, workspace: Path) -> DailyOutput:
                 values={variable: float(value) for variable, value in given_values(day, conditions, units).items()},
             )
         )
-    return DailyOutput(date=task["date"], source=data_source(found), cities=rows)
-
-
-def run_marker_path(workspace: Path) -> Path:
-    return workspace.resolve() / REPORT_DIR / RUN_MARKER
-
-
-def write_run_marker(workspace: Path) -> str:
-    """Record this process's run token at reports/run.json (the server does it when it starts)."""
-    path = run_marker_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_atomic(path, json.dumps({"run": RUN, "started": datetime.now(UTC).isoformat(timespec="seconds")}, indent=2) + "\n")
-    return RUN
-
-
-def marker_is_current(workspace: Path) -> bool:
-    path = run_marker_path(workspace)
-    if not path.is_file():
-        return False
-    try:
-        found = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        return False
-    return isinstance(found, dict) and found.get("run") == RUN
+    return DailyOutput(date=task["date"], run=RUN, source=data_source(found), cities=rows)
 
 
 def call_summary(name: str, arguments: dict) -> dict:
@@ -215,8 +242,9 @@ def call_summary(name: str, arguments: dict) -> dict:
 
 
 def log_call(workspace: Path, name: str, arguments: dict, result: str, seconds: float) -> None:
-    """Append one line for a tool call to reports/calls.log in the workspace (the member's folder for
-    this plugin), keeping the last CALL_LOG_LINES lines; a log that cannot be written never fails a call."""
+    """Append one line for a tool call to this run's reports/<run>/calls.log in the workspace (the
+    member's folder for this plugin), keeping the last CALL_LOG_LINES lines; a log that cannot be
+    written never fails a call."""
     line = json.dumps(
         {
             "at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -228,9 +256,8 @@ def log_call(workspace: Path, name: str, arguments: dict, result: str, seconds: 
         }
     )
     try:
-        path = workspace.resolve() / REPORT_DIR / CALL_LOG
         with LOCK:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            path = ensure_run_folder(workspace) / CALL_LOG
             lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
             lines.append(line)
             write_atomic(path, "\n".join(lines[-CALL_LOG_LINES:]) + "\n")
@@ -240,8 +267,7 @@ def log_call(workspace: Path, name: str, arguments: dict, result: str, seconds: 
 
 def mergeable_report(path: Path, task: dict, sha256: str) -> dict | None:
     """The report this run already wrote at ``path`` for ``task`` on the same data, or None when there is
-    none or the file is a leftover (not a well-formed report, another task, data or run's): the call
-    then starts afresh."""
+    none or it is for another task or data: the call then starts afresh."""
     if not path.is_file():
         return None
     try:
@@ -256,11 +282,11 @@ def mergeable_report(path: Path, task: dict, sha256: str) -> dict | None:
 
 
 def report_alerts(given: ReportInput, workspace: Path) -> ReportOutput:
-    """Merge this call's judgement into reports/<date>.json: every examined city is restated by the
-    call (its earlier entries go, this call's entries come in; no entry means no alert), every other
-    city's entries are kept. The merge is atomic per call, and the answer is the merged report as it
-    stands right after it, naming the data it judges: how many cities are examined, whether that is
-    every city, and the report itself, which the agent submits once it is complete."""
+    """Merge this call's judgement into this run's reports/<run>/<date>.json: every examined city is
+    restated by the call (its earlier entries go, this call's entries come in; no entry means no alert),
+    every other city's entries are kept. The merge is atomic per call, and the answer is the merged
+    report as it stands right after it, naming its run and the data it judges: how many cities are
+    examined, whether that is every city, and the report itself, which the agent submits once complete."""
     task = checked_task(given.task)
     date = task["date"]
     found = sources.cached(date)
@@ -272,13 +298,11 @@ def report_alerts(given: ReportInput, workspace: Path) -> ReportOutput:
     problem = judgement_problem(task, list(examined), given_plain["alerts"], given_plain["unavailable"])
     if problem:
         raise ValueError(problem)
-    path = workspace.resolve() / report_path(date)
+    path = workspace.resolve() / report_path(date, RUN)
     covered = set(examined)
     source = found.source()
     with LOCK:
-        if not marker_is_current(workspace):
-            write_run_marker(workspace)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_run_folder(workspace)
         earlier = mergeable_report(path, task, found.sha256) or {"examined": [], "alerts": [], "unavailable": []}
         merged = {
             "date": date,
@@ -293,12 +317,13 @@ def report_alerts(given: ReportInput, workspace: Path) -> ReportOutput:
         write_atomic(path, json.dumps(merged, indent=2) + "\n")
     report = AlertReportOutput(
         task=given.task,
+        run=RUN,
         data=build_output(source, DataSource),
         alerts=[Alert(city=entry["city"], values=dict(entry["values"]), matched=list(entry["matched"])) for entry in merged["alerts"]],
         unavailable=[Unavailable(city=entry["city"], variables=list(entry["variables"])) for entry in merged["unavailable"]],
     )
     return ReportOutput(
-        path=report_path(date),
+        path=report_path(date, RUN),
         examined=len(merged["examined"]),
         complete=len(merged["examined"]) == len(CITY_NAMES),
         report=report,

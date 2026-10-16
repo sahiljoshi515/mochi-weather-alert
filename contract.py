@@ -57,9 +57,10 @@ CONDITION = (
     'the number in the requested units (humidity in %), with at most 2 decimals; e.g. "max_temp >= 95"'
 )
 SAMPLES = (
-    "Readings at an instant inside the local day: 23 to 25 hourly ones (23 when clocks go forward, 25 when they go "
-    "back), or 3 to 5 six-hourly ones for the seasonal outlook"
+    "Readings at an instant inside the local day: 24 hourly ones, 23 or 25 when clocks change that day (22 to 26 on "
+    "some 1940s days, which lasted 22.5 to 25.5 hours), or 3 to 5 six-hourly ones for the seasonal outlook"
 )
+RUN = "The run that read the data and saved the report, as get_daily and report_alerts return it: copy it unchanged"
 MISSING = (
     "Source variables with a reading missing that day: temperature_2m, relative_humidity_2m, precipitation or "
     "wind_speed_10m"
@@ -108,7 +109,8 @@ class Alert(Output):
     city: Annotated[str, CITY]
     values: Annotated[
         dict[str, float],
-        'Each variable the conditions use, in the requested units, rounded half up to 1 decimal, e.g. {"max_temp": 96.3}',
+        'Each variable the conditions use, in the requested units, rounded to 1 decimal with ties away from zero '
+        '(2.25 -> 2.3, -2.25 -> -2.3), e.g. {"max_temp": 96.3}',
     ]
     matched: Annotated[list[str], "The conditions that hold for the city, as given in the task"]
 
@@ -137,11 +139,13 @@ class PinOutput(Output):
     date: str
     clock: Annotated[str, "The answer key's clock reading, a UTC time YYYY-MM-DDTHH:MM"]
     candidates: Annotated[list[PinnedSource], "The data the rules choose at the clock and 10 minutes before it: one source, or two"]
+    prior_runs: Annotated[list[str], "The runs whose folders were in the workspace when the answer key was pinned: none of them is this task's"]
 
 
 @dataclass
 class AlertReportOutput(Output):
     task: Annotated[AlertInput, TASK]
+    run: Annotated[str, RUN]
     data: Annotated[DataSource, "The data the report judges, as report_alerts returned it"]
     alerts: Annotated[list[Alert], "Every city whose day satisfies the rules, with its values and matched conditions; [] for none"]
     unavailable: Annotated[list[Unavailable], "Every city with a missing reading for a variable the conditions use; [] for none"]
@@ -162,13 +166,14 @@ class DailyCity(Output):
         dict[str, float],
         "Each variable the task's conditions use that the day has every reading of, in the task's units, exact to 9 "
         "decimals (truncated, never rounded): compare the conditions against these as they are, and report each "
-        'one rounded half up to 1 decimal, e.g. {"max_temp": 96.26, "wind": 24.979121927}',
+        'one rounded to 1 decimal, ties away from zero (2.25 -> 2.3, -2.25 -> -2.3), e.g. {"max_temp": 96.26, "wind": 24.979121927}',
     ]
 
 
 @dataclass
 class DailyOutput(Output):
     date: str
+    run: Annotated[str, RUN]
     source: Annotated[DataSource, "The data the values come from"]
     cities: list[DailyCity]
 
@@ -189,10 +194,10 @@ class ReportInput(Output):
 
 @dataclass
 class ReportOutput(Output):
-    path: Annotated[str, "The report file, relative to the workspace: reports/<date>.json"]
+    path: Annotated[str, "The report file, relative to the workspace: reports/<run>/<date>.json"]
     examined: Annotated[int, "How many of the 30 cities the merged report has examined so far"]
     complete: Annotated[bool, "Whether every city is examined: then submit the report"]
-    report: Annotated[AlertReportOutput, "The merged report so far: the task, its data, every alert and every unavailable city"]
+    report: Annotated[AlertReportOutput, "The merged report so far: the task, its run and data, every alert and every unavailable city"]
 
 
 @dataclass

@@ -6,6 +6,8 @@ whatever the caller has put in plugin.openmeteo.OPENER and plugin.sources.CLOCK.
 from __future__ import annotations
 
 import json
+import shutil
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -36,12 +38,27 @@ def resolve(value, outputs):
     return value
 
 
-def replay(case: dict) -> dict:
-    """The verdict of a case, or {"error": ...} when the run is refused before the agent starts."""
+def stage_agent_folder(case: dict, base: Path | None, workspace: Path) -> None:
+    """The member's agent folder a case names (a tar or a folder), unpacked into the workspace."""
+    if not case.get("agent_folder"):
+        return
+    source = Path(case["agent_folder"])
+    source = source if source.is_absolute() else (base or Path(".")) / source
+    if source.is_dir():
+        shutil.copytree(source, workspace, dirs_exist_ok=True)
+    else:
+        with tarfile.open(source) as archive:
+            archive.extractall(workspace, filter="data")
+
+
+def replay(case: dict, base: Path | None = None) -> dict:
+    """The verdict of a case, or {"error": ...} when the run is refused before the agent starts. ``base``
+    resolves a relative agent_folder (the cases folder)."""
     task = Task(case["task"])
     given_class, output_class = TASKS[task]
     arguments = build_output(case["arguments"], given_class)
     workspace = Path(tempfile.mkdtemp(prefix="weather-case-"))
+    stage_agent_folder(case, base, workspace)
     sources.CACHE.clear()
     if task is Task.CHECK_DATE:
         output = alerts.check_date(arguments, workspace)
@@ -50,10 +67,12 @@ def replay(case: dict) -> dict:
         check = verifier.verify_input("pin_alerts", arguments)
         if not check["valid"]:
             raise ValueError(f"plugin input verification failed: {check['message']}")
-        reference = alerts.pin_alerts(arguments, Path(tempfile.mkdtemp(prefix="weather-case-ref-")))
+        scratch = Path(tempfile.mkdtemp(prefix="weather-case-ref-"))
+        if case.get("agent_folder"):  # the site's staging: the answer key's scratch is a copy of the workspace
+            shutil.copytree(workspace, scratch, dirs_exist_ok=True)
+        reference = alerts.pin_alerts(arguments, scratch)
     except (ValueError, RuntimeError) as error:
         return {"error": f"{type(error).__name__}: {error}"}
-    alerts.write_run_marker(workspace)
     outputs: dict = {}
     submitted = None
     for step in case["steps"]:

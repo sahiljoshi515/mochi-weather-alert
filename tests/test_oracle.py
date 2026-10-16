@@ -54,7 +54,12 @@ def test_the_oracle_and_the_verifier_agree(offline, scenario: dict) -> None:
     from datetime import datetime
 
     clock = datetime.fromisoformat(scenario["clock"])
-    run = Run({"date": scenario["date"], "match": "any", "temperature_unit": "C", "wind_unit": "kmh", "rain_unit": "mm", "conditions": ["max_temp >= 30"]}, offline, clock=clock)
+    task = {"date": scenario["date"], "match": "any", "temperature_unit": "C", "wind_unit": "kmh", "rain_unit": "mm", "conditions": ["max_temp >= 30"]}
+    if scenario.get("read_error"):  # the date came into range minutes before the clock: refused since WA-03
+        with pytest.raises(ValueError, match="came into range only in the last 10 minutes"):
+            Run(task, offline, clock=clock)
+        return
+    run = Run(task, offline, clock=clock)
     randomly = random.Random(f"weather-oracle:{scenario['date']}:{scenario['clock']}")
     for candidate in plain_output(run.pin)["candidates"]:
         locations = recorded(candidate["request"])["body"]

@@ -1,61 +1,60 @@
-"""The receipt get_daily leaves of the data this run's agent read: reports/<date>.source.json."""
+"""The receipt get_daily leaves of the data a run's agent read: reports/<run>/<date>.source.json."""
 
 from pathlib import Path
 
-from .checks import REPORT_DIR, read_json, run_of
+from .checks import read_json, run_problem
 from .rules import (
     SHA256,
     choice_problem,
     cities_problem,
     date_text,
     key_of,
+    receipt_path,
     series_sha256,
     source_problem,
+    source_request,
     stamp_minutes,
 )
 
 RECEIPT_KEYS = ("run", "date", "source", "clock", "fetched_at", "request", "skipped", "sha256", "cities")
+ALTERED = "the receipt was altered after get_daily"
 
 
-def receipt_path(date):
-    return f"{REPORT_DIR}/{date}.source.json"
-
-
-def receipt_of(workspace, date):
-    """(the receipt of the data this run's agent read for ``date``, None) or (None, why there is none
-    that counts): written by get_daily in this run, the data the date rules choose at its clock,
-    well formed, and matching its own hash."""
-    where = receipt_path(date)
+def receipt_of(workspace, date, run):
+    """(the receipt of the data run ``run``'s agent read for ``date``, None) or (None, why there is none
+    that counts): written by get_daily in that run, the data the date rules choose at its clock, its
+    readings matching its own request and hash."""
+    problem = run_problem(workspace, run)
+    if problem:
+        return None, problem
+    where = receipt_path(date, run)
     found, problem = read_json(Path(workspace) / where)
     if problem == "missing":
-        return None, f"the agent never read {date}'s data with get_daily (no {where})"
+        return None, f"the agent never read {date}'s data with get_daily in run {run} (no {where})"
     if problem:
         return None, f"{where} is not a receipt: {problem}"
     if not isinstance(found, dict) or set(found) != set(RECEIPT_KEYS):
         return None, f"{where} is not a receipt get_daily wrote"
-    run = run_of(workspace)
-    if run is None:
-        return None, "no run marker in the workspace: the plugin did not start here"
-    if found["run"] != run:
-        return None, f"{where} was left by an earlier run: the agent never read {date}'s data in this run"
-    if found["date"] != date:
-        return None, f"{where} is for another date"
+    if found["run"] != run or found["date"] != date:
+        return None, f"{ALTERED}: {where} names run {found['run']!r} and date {found['date']!r}"
     problem = source_problem(found["source"])
     if problem:
-        return None, f"{where}: {problem}"
+        return None, f"{ALTERED}: {problem}"
     clock = stamp_minutes(found["clock"])
     if clock is None or found["source"]["today"] != date_text(clock // 1440):
-        return None, f"{where}: its clock and today disagree"
-    if not isinstance(found["skipped"], list) or not all(isinstance(run, str) for run in found["skipped"]):
-        return None, f"{where}: skipped must list runs"
+        return None, f"{ALTERED}: its clock and today disagree"
+    if not isinstance(found["skipped"], list) or not all(isinstance(entry, str) for entry in found["skipped"]):
+        return None, f"{ALTERED}: skipped must list runs"
     problem = choice_problem(date, clock, key_of(found["source"]), found["skipped"])
     if problem:
         return None, f"the data the agent read breaks the date rules: {problem}"
+    if found["request"] != source_request(date, key_of(found["source"])):
+        return None, f"{ALTERED}: its request is not the one that fetches the {found['source']['label']} for {date}"
     problem = cities_problem(date, found["source"]["step_hours"], found["cities"])
     if problem:
-        return None, f"{where}: {problem}"
+        return None, f"{ALTERED}: {problem}"
     if not isinstance(found["sha256"], str) or not SHA256.fullmatch(found["sha256"]):
-        return None, f"{where}: sha256 must name the data"
+        return None, f"{ALTERED}: sha256 must name the data"
     if series_sha256(date, key_of(found["source"]), found["cities"]) != found["sha256"]:
-        return None, f"{where} does not match its own sha256: it was changed after get_daily wrote it"
+        return None, f"{ALTERED}: its readings no longer match its own sha256"
     return found, None

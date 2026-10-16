@@ -79,7 +79,7 @@
    "save_as": "last"
   },
   {
-   "python": "path = workspace / 'reports' / '2026-07-07.source.json'; receipt = json.loads(path.read_text()); receipt['cities'][0]['temperature_2m'][0] += 1; path.write_text(json.dumps(receipt))"
+   "python": "path = workspace / 'reports' / outputs['daily']['run'] / '2026-07-07.source.json'; receipt = json.loads(path.read_text()); receipt['cities'][0]['temperature_2m'][0] += 1; path.write_text(json.dumps(receipt))"
   },
   {
    "tool": "submit",
@@ -89,6 +89,6 @@
  "expect": {
   "valid": false,
   "score_max": 0.0,
-  "message_contains": "does not match its own sha256"
+  "message_contains": "the receipt was altered after get_daily: its readings no longer match its own sha256"
  }
 }
