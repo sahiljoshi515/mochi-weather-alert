@@ -1,396 +1,358 @@
-"""The shared rules: grammar, exact conversions, half-up rounding, aggregates and evaluation."""
+"""The shared rules: the grammar, the calendar, the date policy at any clock (the date and clock
+matrices), a day's aggregates, the canonical hash, and exact arithmetic."""
 
 from __future__ import annotations
 
+import random
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
 
 import pytest
 
 from plugin.rules import (
-    CHUNK,
-    DayMetrics,
+    CITY_NAMES,
+    DataKind,
     Units,
-    aggregate,
-    canonical_task,
+    canonical_series,
+    choice_problem,
+    choose,
+    civil_from_days,
     convert,
     date_problem,
+    date_text,
+    day_metrics,
+    day_number,
+    days_from_civil,
     evaluate,
-    expected_output,
-    given_values,
+    forecast_runs,
     holds,
-    judgement_problem,
-    metrics_from_plain,
-    needed_variables,
+    outlook_last_day,
     parse_condition,
     parse_conditions,
-    plain_report,
-    report_problem,
     round_half_up,
-    task_problem,
+    series_problem,
+    series_sha256,
+    stamp_minutes,
+    stamp_text,
+    stamps_inside,
     truncate,
+    weekday,
+    windows_of,
 )
 
-METRIC = Units("C", "kmh", "mm")
-IMPERIAL = Units("F", "mph", "in")
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
-def metrics(city, *, max_temp="30.0", min_temp="20.0", rain="0.0", wind="10.0", humidity_sum="1200", hours=24, missing=()):
-    return DayMetrics(
-        city=city,
-        hours=hours,
-        max_temp_c=None if max_temp is None else Decimal(max_temp),
-        min_temp_c=None if min_temp is None else Decimal(min_temp),
-        rain_mm=None if rain is None else Decimal(rain),
-        max_wind_kmh=None if wind is None else Decimal(wind),
-        humidity_sum_pct=None if humidity_sum is None else Decimal(humidity_sum),
-        humidity_hours=0 if humidity_sum is None else hours,
-        missing=tuple(missing),
-    )
+def minutes(text: str) -> int:
+    instant = datetime.fromisoformat(text)
+    return int((instant - EPOCH).total_seconds()) // 60
 
 
 # ----- Grammar -----
 
 
-@pytest.mark.parametrize(
-    ("text", "canonical"),
-    [
-        ("max_temp >= 95", "max_temp >= 95"),
-        ("max_temp>=95.00", "max_temp >= 95"),
-        ("  rain > .5 ", "rain > 0.5"),
-        ("wind <= +007.10", "wind <= 7.1"),
-        ("humidity < 100", "humidity < 100"),
-        ("min_temp < -0.00", "min_temp < 0"),
-        ("min_temp <= -3.25", "min_temp <= -3.25"),
-    ],
-)
-def test_parses_conditions_into_their_canonical_form(text: str, canonical: str) -> None:
-    found = parse_condition(text)
-    assert found.text == canonical
-    assert found.threshold == Decimal(canonical.split()[2])
+@pytest.mark.parametrize("text", ["max_temp >= 95", "rain>0.5", " wind<=  20.25 ", "humidity < .5", "min_temp >= -10"])
+def test_conditions_parse(text: str) -> None:
+    assert parse_condition(text).text.split()[0] in ("max_temp", "rain", "wind", "humidity", "min_temp")
 
 
-@pytest.mark.parametrize(
-    "text",
-    ["temp >= 3", "max_temp = 3", "max_temp == 3", "max_temp >= 1.234", "max_temp >=", ">= 3", "max_temp >= 3 and rain > 0", "", "max_temp ≥ 3", "MAX_TEMP >= 3", None],
-)
-def test_refuses_what_is_not_a_condition(text) -> None:
+@pytest.mark.parametrize("text", ["max_temp => 95", "temp >= 9", "rain > 0.555", "wind >= ٢٠", "rain > 1e3", "max_temp >= 95 F", ""])
+def test_malformed_conditions_are_refused(text: str) -> None:
     with pytest.raises(ValueError, match="is not a condition"):
         parse_condition(text)
 
 
-def test_refuses_too_few_too_many_or_repeated_conditions() -> None:
+def test_conditions_must_be_one_to_six_and_distinct() -> None:
     with pytest.raises(ValueError, match="1 to 6"):
         parse_conditions([])
     with pytest.raises(ValueError, match="1 to 6"):
-        parse_conditions([f"max_temp >= {n}" for n in range(7)])
+        parse_conditions([f"wind >= {n}" for n in range(7)])
     with pytest.raises(ValueError, match="given twice"):
-        parse_conditions(["rain > 0", "wind > 5", "rain > 0.0"])
-    assert [c.text for c in parse_conditions(["rain > 0", "rain >= 0"])] == ["rain > 0", "rain >= 0"]
-    assert needed_variables(parse_conditions(["wind > 5", "humidity < 30", "wind >= 1"])) == ("wind", "humidity")
+        parse_conditions(["rain > 0.5", "rain>0.50"])
 
 
 @pytest.mark.parametrize(
-    ("date", "problem"),
+    ("text", "problem"),
     [
-        ("2026-07-01", None),
-        ("2026-09-30", None),
-        ("2026-06-30", "outside the snapshot"),
-        ("2026-10-01", "outside the snapshot"),
-        ("2026-09-31", "not a calendar day"),
-        ("2026-02-30", "not a calendar day"),
+        ("2026-10-16", None),
+        ("1940-01-01", None),
+        ("9999-12-31", None),
+        ("1939-12-31", "before 1940-01-01"),
         ("2026-13-01", "not a calendar day"),
-        ("26-09-06", "YYYY-MM-DD"),
-        ("2026/09/06", "YYYY-MM-DD"),
-        ("Sep 6", "YYYY-MM-DD"),
-        (20260906, "YYYY-MM-DD"),
+        ("2026-02-29", "not a calendar day"),
+        ("2024-02-29", None),
+        ("2000-02-29", None),
+        ("1900-02-29", "not a calendar day"),
+        ("26-10-16", "YYYY-MM-DD"),
+        ("2026/10/16", "YYYY-MM-DD"),
+        ("2026-10-16T00:00", "YYYY-MM-DD"),
+        (" 2026-10-16", "YYYY-MM-DD"),
+        ("2026-10-16\n", "YYYY-MM-DD"),
+        ("", "YYYY-MM-DD"),
+        ("today", "YYYY-MM-DD"),
+        ("٢٠٢٦-١٠-١٦", "YYYY-MM-DD"),
+        ("0000-01-01", "before"),
+        ("10000-01-01", "YYYY-MM-DD"),
     ],
 )
-def test_checks_dates(date, problem) -> None:
-    found = date_problem(date)
-    assert (found is None) == (problem is None)
-    if problem:
-        assert problem in found
+def test_dates(text: str, problem: str | None) -> None:
+    found = date_problem(text)
+    assert (found is None) if problem is None else (problem in found)
 
 
-# ----- Arithmetic -----
+# ----- The calendar -----
 
 
-def test_converts_exactly() -> None:
-    assert convert("max_temp", Fraction(35), IMPERIAL) == 95
-    assert convert("min_temp", Fraction(Decimal("-40.0")), IMPERIAL) == -40
-    assert convert("wind", Fraction(Decimal("40.2")), IMPERIAL) == Fraction(402, 10) / Fraction(1609344, 1000000)
-    assert convert("wind", Fraction(36), Units("C", "ms", "mm")) == 10
-    assert convert("rain", Fraction(Decimal("12.7")), IMPERIAL) == Fraction(1, 2)
-    assert convert("humidity", Fraction(71, 2), IMPERIAL) == Fraction(71, 2)
-    assert convert("max_temp", Fraction(Decimal("33.3")), METRIC) == Fraction(333, 10)
+def test_the_day_number_matches_the_proleptic_calendar() -> None:
+    randomly = random.Random(7)
+    for _ in range(3000):
+        day = date.fromordinal(randomly.randint(date(1, 1, 1).toordinal(), date(9999, 12, 31).toordinal()))
+        number = days_from_civil(day.year, day.month, day.day)
+        assert number == (day - date(1970, 1, 1)).days
+        assert civil_from_days(number) == (day.year, day.month, day.day)
+        assert weekday(day.isoformat()) == day.strftime("%A")
+
+
+def test_stamps_round_trip() -> None:
+    for text in ("1940-01-01T00:00", "2026-10-16T04:00", "2024-02-29T23:59"):
+        assert stamp_text(stamp_minutes(text)) == text
+        assert stamp_minutes(text + "Z") == stamp_minutes(text) == minutes(text + "+00:00")
+    assert stamp_minutes("2026-10-16T24:00") is None and stamp_minutes("2026-10-16 04:00") is None
+
+
+# ----- The date policy (the date matrix, at the recorded clock) -----
+
+CLOCK = minutes("2026-10-16T04:00+00:00")  # today is 2026-10-16
 
 
 @pytest.mark.parametrize(
-    ("value", "rounded"),
+    ("text", "kind", "model", "runs"),
     [
-        (Fraction(2495, 100), "25.0"),
-        (Fraction(7125, 100), "71.3"),
-        (Fraction(7175, 100), "71.8"),
-        (Fraction(1715, 24), "71.5"),
-        (Fraction(24979, 1000), "25.0"),
-        (Fraction(-5, 100), "-0.1"),
-        (Fraction(-4, 100), "0.0"),
-        (Fraction(49, 1000), "0.0"),
-        (Fraction(0), "0.0"),
-        (Fraction(95), "95.0"),
-        (Fraction(-1049, 10), "-104.9"),
+        ("1940-01-01", "archive", "era5", ()),
+        ("2016-12-31", "archive", "era5", ()),
+        ("2017-01-01", "archive", "era5", ()),
+        ("2017-01-02", "archive", "ecmwf_ifs", ()),
+        ("2024-02-29", "archive", "ecmwf_ifs", ()),
+        ("2026-10-06", "archive", "ecmwf_ifs", ()),
+        ("2026-10-14", "archive", "ecmwf_ifs", ()),
+        ("2026-10-15", "forecast", "ecmwf_ifs", ("2026-10-14T06:00", "2026-10-14T00:00", "2026-10-13T18:00")),
+        ("2026-10-16", "forecast", "ecmwf_ifs", ("2026-10-15T06:00", "2026-10-15T00:00", "2026-10-14T18:00")),
+        ("2026-10-17", "forecast", "ecmwf_ifs", ("2026-10-15T18:00", "2026-10-15T12:00", "2026-10-15T06:00")),
+        ("2026-10-25", "forecast", "ecmwf_ifs", ("2026-10-15T12:00", "2026-10-15T00:00", "2026-10-14T12:00")),
+        ("2026-10-29", "forecast", "ecmwf_ifs", ("2026-10-15T12:00",)),
+        ("2026-10-30", "outlook", "ecmwf_seas5_ensemble_mean", ()),
+        ("2026-11-01", "outlook", "ecmwf_seas5_ensemble_mean", ()),
+        ("2027-04-30", "outlook", "ecmwf_seas5_ensemble_mean", ()),
     ],
 )
-def test_rounds_half_up_away_from_zero(value: Fraction, rounded: str) -> None:
-    found = round_half_up(value)
-    assert str(found) == rounded
-    assert found == Decimal(rounded)
+def test_the_date_matrix(text: str, kind: str, model: str, runs: tuple) -> None:
+    choice = choose(text, CLOCK)
+    assert (choice.kind, choice.model, choice.runs) == (kind, model, runs)
+    assert choice.step_hours == (6 if kind == "outlook" else 1) and not choice.problem
 
 
-def test_compares_the_exact_value_at_the_boundary() -> None:
-    at = Fraction(95)
-    assert holds(at, parse_condition("max_temp >= 95")) is True
-    assert holds(at, parse_condition("max_temp > 95")) is False
-    assert holds(at, parse_condition("max_temp <= 95")) is True
-    assert holds(at, parse_condition("max_temp < 95")) is False
-    # 40.2 km/h is 24.979 mph: reported as 25.0, but not at least 25
-    mph = convert("wind", Fraction(Decimal("40.2")), IMPERIAL)
-    assert round_half_up(mph) == Decimal("25.0")
-    assert holds(mph, parse_condition("wind >= 25")) is False
-    assert holds(mph, parse_condition("wind < 25")) is True
+@pytest.mark.parametrize("text", ["2027-05-01", "2030-01-01"])
+def test_dates_past_the_outlook_are_refused_with_the_ranges(text: str) -> None:
+    choice = choose(text, CLOCK)
+    assert choice.kind == "" and "2027-04-30, the last day the ECMWF seasonal outlook covers" in choice.problem
+    assert "Today is 2026-10-16 (UTC)" in choice.problem and "archive to 2026-10-14" in choice.problem
+    assert "forecast run 2026-10-15 to 2026-10-29" in choice.problem and "seasonal outlook 2026-10-30 to 2027-04-30" in choice.problem
 
 
-# ----- Aggregates -----
+def test_every_run_candidate_covers_every_city_and_counts_as_published() -> None:
+    for offset in range(-1, 14):
+        day = CLOCK // 1440 + offset
+        for run in forecast_runs(day, CLOCK):
+            horizon = {0: 360, 6: 144, 12: 360, 18: 144}[run % 1440 // 60] * 60
+            assert run <= day * 1440 - 14 * 60, "the run starts before the earliest city's day"
+            assert run + horizon >= day * 1440 + 35 * 60, "the run reaches past the latest city's day"
+            assert run + 9 * 60 <= CLOCK, "the run counts as published"
 
 
-def rows(count: int, **overrides):
-    found = []
-    for hour in range(count):
-        row = {"temperature_2m": Decimal(10 + hour), "relative_humidity_2m": Decimal(50), "precipitation": Decimal("0.1"), "wind_speed_10m": Decimal(hour)}
-        for variable, values in overrides.items():
-            row[variable] = values[hour]
-        found.append(row)
-    return found
+def test_yesterday_and_today_use_runs_fixed_by_the_date() -> None:
+    for hour in range(24):
+        clock = CLOCK - 4 * 60 + hour * 60  # every hour of 2026-10-16
+        assert choose("2026-10-16", clock).runs[0] == "2026-10-15T06:00"
+        assert choose("2026-10-15", clock).runs[0] == "2026-10-14T06:00"
 
 
-def test_aggregates_a_23_hour_day_over_its_own_rows() -> None:
-    day = aggregate("Santiago", rows(23))
-    assert day.hours == 23 and day.missing == ()
-    assert day.max_temp_c == 32 and day.min_temp_c == 10
-    assert day.rain_mm == Decimal("2.3")  # 23 × 0.1, exactly
-    assert day.max_wind_kmh == 22
-    assert day.humidity_sum_pct == 1150 and day.humidity_hours == 23
+def test_the_outlook_gains_a_month_on_the_seventh() -> None:
+    sixth, seventh = days_from_civil(2026, 10, 6), days_from_civil(2026, 10, 7)
+    assert date_text(outlook_last_day(sixth)) == "2027-03-31"
+    assert date_text(outlook_last_day(seventh)) == "2027-04-30"
+    assert date_text(outlook_last_day(days_from_civil(2026, 12, 31))) == "2027-06-30"
+    assert date_text(outlook_last_day(days_from_civil(2027, 8, 31))) == "2028-02-29"
 
 
-def test_a_missing_hour_marks_the_variable_and_is_never_counted_as_zero() -> None:
-    temps = [Decimal(20)] * 24
-    temps[5] = None
-    day = aggregate("Lima", rows(24, temperature_2m=temps))
-    assert day.missing == ("temperature_2m",)
-    assert day.max_temp_c == 20 and day.min_temp_c == 20
-    rain = [Decimal(1)] * 24
-    rain[0] = None
-    day = aggregate("Lima", rows(24, precipitation=rain))
-    assert day.missing == ("precipitation",) and day.rain_mm == 23
-    humidity = [None] * 24
-    day = aggregate("Lima", rows(24, relative_humidity_2m=humidity))
-    assert day.missing == ("relative_humidity_2m",) and day.humidity_sum_pct is None and day.humidity_hours == 0
-    assert aggregate("Nowhere", []).missing == ("temperature_2m", "relative_humidity_2m", "precipitation", "wind_speed_10m")
+# ----- The clock matrix -----
 
 
-def test_pinned_numbers_round_trip_exactly() -> None:
-    day = metrics_from_plain("Oslo", 24, 12.3, -0.5, 1.2, 33.3, 1711.0, 24, ["precipitation"])
-    assert day.max_temp_c == Decimal("12.3") and day.min_temp_c == Decimal("-0.5") and day.rain_mm == Decimal("1.2")
-    assert day.max_wind_kmh == Decimal("33.3") and day.humidity_sum_pct == 1711 and day.missing == ("precipitation",)
-    assert metrics_from_plain("Oslo", 24, None, None, None, None, None, 0, []).max_temp_c is None
+@pytest.mark.parametrize(
+    ("text", "clock", "earlier", "later"),
+    [
+        # midnight UTC: T-2 is the archive at the clock, a forecast ten minutes before
+        ("2026-10-14", "2026-10-16T00:05", "forecast", "archive"),
+        # midnight UTC: T+13 becomes a forecast day as T advances
+        ("2026-10-30", "2026-10-17T00:05", "outlook", "forecast"),
+        # the 7th: the outlook reaches a month further
+        ("2027-04-15", "2026-10-07T00:05", "", "outlook"),
+        # new year, and a leap day
+        ("2028-01-13", "2027-12-31T00:05", "outlook", "forecast"),
+        ("2024-02-27", "2024-02-29T00:05", "forecast", "archive"),
+    ],
+)
+def test_the_clock_matrix_across_midnight(text: str, clock: str, earlier: str, later: str) -> None:
+    now = minutes(clock + "+00:00")
+    assert choose(text, now - 10).kind == earlier
+    assert choose(text, now).kind == later
 
 
-# ----- Evaluation -----
+@pytest.mark.parametrize("hour", [3, 9, 15, 21])
+def test_the_clock_matrix_across_run_publication(hour: int) -> None:
+    # a run starting at hour - 9 counts as published at the hour: the newest run moves by six hours
+    now = minutes(f"2026-10-16T{hour:02d}:05+00:00")
+    before, after = choose("2026-10-20", now - 10).runs[0], choose("2026-10-20", now).runs[0]
+    assert stamp_minutes(after) - stamp_minutes(before) == 360
 
 
-def test_boundary_tie_and_rounding_in_one_day() -> None:
-    days = [
-        metrics("Boundary", max_temp="35.0", humidity_sum="1710"),  # 95.0 °F exactly; humidity 71.25
-        metrics("Below", max_temp="34.9", humidity_sum="1722"),  # 94.82 °F; humidity 71.75
-        metrics("Windy", max_temp="20.0", wind="40.2"),  # 24.979 mph
-    ]
-    conditions = parse_conditions(["max_temp >= 95", "wind >= 25"])
-    found = evaluate(days, conditions, "any", IMPERIAL)
-    assert [alert.city for alert in found.alerts] == ["Boundary"]
-    assert found.alerts[0].values == {"max_temp": Decimal("95.0"), "wind": Decimal("6.2")}
-    assert found.alerts[0].matched == ("max_temp >= 95",)
-    assert found.unavailable == {}
-    strict = evaluate(days, parse_conditions(["max_temp > 95"]), "any", IMPERIAL)
-    assert strict.alerts == ()
-    humid = evaluate(days, parse_conditions(["humidity >= 71.25"]), "all", IMPERIAL)
-    assert {alert.city: alert.values["humidity"] for alert in humid.alerts} == {"Boundary": Decimal("71.3"), "Below": Decimal("71.8")}
-    assert evaluate(days, parse_conditions(["humidity > 71.25"]), "all", IMPERIAL).alerts[0].city == "Below"
+def test_a_source_follows_the_rules_only_with_its_skipped_runs() -> None:
+    runs = choose("2026-10-17", CLOCK).runs
+    key = ("forecast", "ecmwf_ifs", runs[1], 1)
+    assert choice_problem("2026-10-17", CLOCK, key, [runs[0]]) is None
+    assert "not all tried first" in choice_problem("2026-10-17", CLOCK, key, [])
+    assert "not" in choice_problem("2026-10-17", CLOCK, ("archive", "ecmwf_ifs", "", 1), [])
+    assert choice_problem("2026-07-07", CLOCK, ("archive", "ecmwf_ifs", "", 1), []) is None
+    assert choice_problem("2016-07-07", CLOCK, ("archive", "ecmwf_ifs", "", 1), []) is not None
 
 
-def test_all_needs_every_condition_and_any_needs_one() -> None:
-    days = [metrics("Hot", max_temp="36.0", rain="0.0"), metrics("Wet", max_temp="25.0", rain="12.7"), metrics("Both", max_temp="36.0", rain="20.0")]
-    conditions = parse_conditions(["max_temp >= 95", "rain >= 0.5"])
-    every = evaluate(days, conditions, "all", IMPERIAL)
-    assert [alert.city for alert in every.alerts] == ["Both"]
-    assert every.alerts[0].matched == ("max_temp >= 95", "rain >= 0.5")
-    some = evaluate(days, conditions, "any", IMPERIAL)
-    assert [(alert.city, alert.matched) for alert in some.alerts] == [
-        ("Hot", ("max_temp >= 95",)),
-        ("Wet", ("rain >= 0.5",)),
-        ("Both", ("max_temp >= 95", "rain >= 0.5")),
-    ]
-    assert some.alerts[1].values == {"max_temp": Decimal("77.0"), "rain": Decimal("0.5")}
-
-
-def test_a_missing_needed_variable_makes_the_city_unavailable() -> None:
-    days = [
-        metrics("Gap", max_temp="40.0", missing=["temperature_2m"]),
-        metrics("Fine", max_temp="40.0"),
-        metrics("Other", max_temp="40.0", missing=["precipitation"]),
-        metrics("Empty", max_temp=None, min_temp=None, missing=["temperature_2m"]),
-    ]
-    found = evaluate(days, parse_conditions(["max_temp >= 30", "min_temp >= 0"]), "any", METRIC)
-    assert [alert.city for alert in found.alerts] == ["Fine", "Other"]
-    assert found.unavailable == {"Gap": ("max_temp", "min_temp"), "Empty": ("max_temp", "min_temp")}
-    only_rain = evaluate(days, parse_conditions(["rain >= 0"]), "all", METRIC)
-    assert [alert.city for alert in only_rain.alerts] == ["Gap", "Fine", "Empty"]
-    assert only_rain.unavailable == {"Other": ("rain",)}
-
-
-TASK = {"date": "2026-08-01", "match": "all", "temperature_unit": "F", "wind_unit": "mph", "rain_unit": "in", "conditions": ["max_temp >= 95"]}
-
-
-def test_plain_report_and_expected_output_are_the_file_and_submission_shapes() -> None:
-    days = [metrics("A", max_temp="35.0"), metrics("B", max_temp="10.0", missing=["temperature_2m"])]
-    expected = evaluate(days, parse_conditions(["max_temp >= 95"]), "all", IMPERIAL)
-    assert plain_report(TASK, expected) == {
-        "date": "2026-08-01",
-        "task": TASK,
-        "examined": ["A", "B"],
-        "alerts": [{"city": "A", "values": {"max_temp": 95.0}, "matched": ["max_temp >= 95"]}],
-        "unavailable": [{"city": "B", "variables": ["max_temp"]}],
-    }
-    assert expected_output(TASK, expected) == {
-        "task": TASK,
-        "alerts": [{"city": "A", "values": {"max_temp": 95.0}, "matched": ["max_temp >= 95"]}],
-        "unavailable": [{"city": "B", "variables": ["max_temp"]}],
+def test_windows_of_name_each_range() -> None:
+    assert windows_of(CLOCK // 1440) == {
+        "archive_first": "1940-01-01",
+        "archive_last": "2026-10-14",
+        "forecast_first": "2026-10-15",
+        "forecast_last": "2026-10-29",
+        "outlook_first": "2026-10-30",
+        "outlook_last": "2027-04-30",
     }
 
 
-# ----- The task, a judgement and the report file -----
+# ----- A day's aggregates -----
+
+
+def series(start: str, end: str, offset: int, values: dict, step: int = 1, times: list[str] | None = None) -> dict:
+    first, last = stamp_minutes(start), stamp_minutes(end)
+    stamps = times or [stamp_text(minute) for minute in range(first, last + 1, step * 60) if minute % (step * 60) == 0]
+    return {
+        "city": "London",
+        "timezone": "Europe/London",
+        "start": start,
+        "end": end,
+        "start_offset": offset,
+        "end_offset": offset,
+        "grid": [51.5, -0.12, 11.0],
+        "times": stamps,
+        **{name: [values.get(name, 1.0)] * len(stamps) for name in ("temperature_2m", "relative_humidity_2m", "precipitation", "wind_speed_10m")},
+    }
+
+
+def test_instant_readings_use_start_to_end_and_totals_end_at_each_stamp() -> None:
+    assert stamps_inside(0, 1440, 60, accumulated=False)[0] == 0 and stamps_inside(0, 1440, 60, accumulated=False)[-1] == 1380
+    assert stamps_inside(0, 1440, 60, accumulated=True)[0] == 60 and stamps_inside(0, 1440, 60, accumulated=True)[-1] == 1440
+    assert len(stamps_inside(-330, 1110, 60, accumulated=False)) == 24  # Mumbai's half-hour offset
+    assert len(stamps_inside(15 * 60, 39 * 60, 360, accumulated=False)) == 4  # Tokyo, six-hourly
+
+
+def test_a_day_counts_its_readings_and_misses_an_absent_stamp() -> None:
+    day = series("2026-07-06T23:00", "2026-07-07T23:00", 60, {"temperature_2m": 20.0, "precipitation": 0.1})
+    metrics = day_metrics(day, 1)
+    assert metrics.samples == 24 and metrics.missing == () and metrics.rain_mm == Decimal("2.4")
+    gap = dict(day)
+    gap["times"] = day["times"][:5] + day["times"][6:]
+    for name in ("temperature_2m", "relative_humidity_2m", "precipitation", "wind_speed_10m"):
+        gap[name] = day[name][:5] + day[name][6:]
+    assert set(day_metrics(gap, 1).missing) == {"temperature_2m", "relative_humidity_2m", "precipitation", "wind_speed_10m"}
+    null = dict(day)
+    null["wind_speed_10m"] = list(day["wind_speed_10m"])
+    null["wind_speed_10m"][3] = None
+    assert day_metrics(null, 1).missing == ("wind_speed_10m",)
+    tail = dict(day)  # the rain stamp at the day's end is the last hour's total
+    tail["precipitation"] = list(day["precipitation"])
+    tail["precipitation"][0] = None
+    assert day_metrics(tail, 1).missing == (), "the stamp at the start is the hour before the day"
+
+
+def test_the_canonical_hash_reads_85_and_85_point_0_the_same() -> None:
+    one = series("2026-07-06T23:00", "2026-07-07T23:00", 60, {"relative_humidity_2m": 85})
+    two = series("2026-07-06T23:00", "2026-07-07T23:00", 60, {"relative_humidity_2m": 85.0})
+    key = ("archive", "ecmwf_ifs", "", 1)
+    assert canonical_series("2026-07-07", key, [one]) == canonical_series("2026-07-07", key, [two])
+    assert series_sha256("2026-07-07", key, [one]) != series_sha256("2026-07-07", ("archive", "era5", "", 1), [one])
 
 
 @pytest.mark.parametrize(
-    ("task", "problem"),
+    ("change", "words"),
     [
-        (TASK, None),
-        ({**TASK, "conditions": ["max_temp>=95.00", "rain > .5"]}, None),
-        ({**TASK, "date": "2026-10-01"}, "outside the snapshot"),
-        ({**TASK, "match": "some"}, "match must be all or any"),
-        ({**TASK, "temperature_unit": "K"}, "temperature_unit"),
-        ({**TASK, "wind_unit": "knots"}, "wind_unit"),
-        ({**TASK, "rain_unit": "cm"}, "rain_unit"),
-        ({**TASK, "conditions": []}, "1 to 6"),
-        ({**TASK, "conditions": ["hot > 1"]}, "not a condition"),
-        ({key: value for key, value in TASK.items() if key != "match"}, "task must hold"),
-        ({**TASK, "extra": 1}, "task must hold"),
-        ("not a task", "task must hold"),
+        ({"start": "2026-07-06T19:00"}, "not local midnight"),
+        ({"start_offset": 900}, "offsets must be whole minutes"),
+        ({"start_offset": 600, "end_offset": 600}, "solar time"),
+        ({"timezone": "Europe/Paris"}, "time zone"),
+        ({"times": ["2026-07-07T00:30"]}, "off the 1-hourly grid"),
+        ({"city": "Atlantis"}, "not one of the cities"),
     ],
 )
-def test_checks_a_task(task, problem) -> None:
-    found = task_problem(task)
-    assert (found is None) == (problem is None), found
-    if problem:
-        assert problem in found
+def test_a_series_is_checked_by_hand(change: dict, words: str) -> None:
+    day = series("2026-07-06T23:00", "2026-07-07T23:00", 60, {})
+    assert series_problem("2026-07-07", 1, day) is None
+    broken = {**day, **change}
+    if "times" in change:
+        for name in ("temperature_2m", "relative_humidity_2m", "precipitation", "wind_speed_10m"):
+            broken[name] = [1.0]
+    assert words in series_problem("2026-07-07", 1, broken)
 
 
-@pytest.mark.parametrize(
-    ("value", "cut"),
-    [
-        (Fraction(24979057929, 10**9), "24.979057929"),
-        (Fraction(Decimal("40.2")) / Fraction("1.609344"), "24.979121927"),
-        (Fraction("2.5"), "2.500000000"),
-        (Fraction(1, 3), "0.333333333"),
-        (Fraction(2, 3), "0.666666666"),
-        (Fraction(-2, 3), "-0.666666666"),
-        (Fraction(-5, 100), "-0.050000000"),
-        (Fraction(0), "0.000000000"),
-        (Fraction(95), "95.000000000"),
-    ],
-)
-def test_truncates_toward_zero_keeping_the_exact_digits(value: Fraction, cut: str) -> None:
-    found = truncate(value)
-    assert format(found, "f") == cut and found == Decimal(cut)  # a zero's str is 0E-9; its digits are all there
-    assert abs(Fraction(found)) <= abs(value) and abs(value) - abs(Fraction(found)) < Fraction(1, 10**9)
-    assert str(truncate(Fraction(1, 3), 2)) == "0.33"
+# ----- Exact arithmetic and evaluation -----
 
 
-def test_rounding_the_truncated_value_half_up_is_rounding_the_exact_value() -> None:
-    for value in (Fraction(2495, 100), Fraction(7125, 100), Fraction(24979, 1000), Fraction(1, 3), Fraction(44999999, 10**8), Fraction(45, 100)):
-        assert round_half_up(Fraction(truncate(value))) == round_half_up(value)
+def test_conversions_are_exact() -> None:
+    units = Units("F", "mph", "in")
+    assert convert("max_temp", Fraction(100), units) == 212
+    assert convert("wind", Fraction("1.609344"), units) == 1
+    assert convert("rain", Fraction("25.4"), units) == 1
+    assert convert("wind", Fraction("3.6"), Units("C", "ms", "mm")) == 1
 
 
-def test_given_values_are_the_needed_available_variables_in_the_units() -> None:
-    day = metrics("Boundary", max_temp="35.0", min_temp="20.0", rain="11.43", wind="40.2", humidity_sum="1710")
-    conditions = parse_conditions(["max_temp >= 95", "wind >= 25", "rain > 0.5"])
-    assert given_values(day, conditions, IMPERIAL) == {"max_temp": Decimal("95.000000000"), "rain": Decimal("0.450000000"), "wind": Decimal("24.979121927")}
-    assert given_values(day, parse_conditions(["humidity > 70"]), METRIC) == {"humidity": Decimal("71.250000000")}
-    gap = metrics("Gap", max_temp="40.0", missing=["temperature_2m"])
-    assert given_values(gap, conditions, IMPERIAL) == {"rain": Decimal("0.000000000"), "wind": Decimal("6.213711922")}
-    assert CHUNK == 15
+@pytest.mark.parametrize(("value", "expected"), [("24.95", "25.0"), ("71.25", "71.3"), ("-0.05", "-0.1"), ("0.04", "0.0"), ("83.25", "83.3"), ("24.979121927", "25.0")])
+def test_rounding_is_half_up(value: str, expected: str) -> None:
+    assert round_half_up(Fraction(value)) == Decimal(expected)
 
 
-def test_canonical_tasks_compare_equal_when_they_mean_the_same() -> None:
-    spelled = {**TASK, "conditions": ["max_temp>=95.00"]}
-    assert canonical_task(spelled) == canonical_task(TASK) == TASK
-    assert canonical_task({**TASK, "match": "any"}) != canonical_task(TASK)
-    assert canonical_task({**TASK, "conditions": ["max_temp > 95"]}) != canonical_task(TASK)
+def test_truncation_keeps_nine_decimals_toward_zero() -> None:
+    assert str(truncate(Fraction(1, 3))) == "0.333333333"
+    assert str(truncate(Fraction(-1, 3))) == "-0.333333333"
+    assert str(truncate(Fraction("0.45"))) == "0.450000000"
 
 
-ANY = {**TASK, "match": "any", "conditions": ["max_temp >= 95", "rain > 0.5"]}
-HOT = {"city": "A", "values": {"max_temp": 95.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}
+def test_equality_meets_greater_or_equal_only() -> None:
+    condition = parse_condition("max_temp >= 95")
+    assert holds(Fraction(95), condition) and not holds(Fraction(95), parse_condition("max_temp > 95"))
+    assert holds(Fraction(95), parse_condition("max_temp <= 95")) and not holds(Fraction(95), parse_condition("max_temp < 95"))
 
 
-@pytest.mark.parametrize(
-    ("task", "examined", "alerts", "unavailable", "problem"),
-    [
-        (ANY, ["A", "B"], [HOT], [{"city": "B", "variables": ["rain"]}], None),
-        (ANY, None, [HOT], [], None),
-        (ANY, ["A"], [{**HOT, "matched": ["max_temp>=95.0"]}], [], None),
-        (ANY, ["A"], [{**HOT, "values": {"max_temp": 95.0}}], [], "exactly the variables"),
-        (ANY, ["A"], [{**HOT, "values": {"max_temp": 95.0, "rain": 0.0, "wind": 1.0}}], [], "exactly the variables"),
-        (ANY, ["A"], [{**HOT, "values": {"max_temp": "95"}}], [], "values must map"),
-        (ANY, ["A"], [{**HOT, "matched": []}], [], "at least one condition"),
-        (ANY, ["A"], [{**HOT, "matched": ["wind > 1"]}], [], "does not have"),
-        (ANY, ["A"], [{**HOT, "matched": ["hot"]}], [], "not a condition"),
-        (ANY, ["A"], [{**HOT, "matched": ["max_temp >= 95", "max_temp >= 95.0"]}], [], "listed twice"),
-        ({**ANY, "match": "all"}, ["A"], [HOT], [], "every condition"),
-        ({**ANY, "match": "all"}, ["A"], [{**HOT, "values": {"max_temp": 95.0, "rain": 0.6}, "matched": ["rain > 0.5", "max_temp >= 95"]}], [], None),
-        (ANY, ["A"], [], [{"city": "A", "variables": ["wind"]}], "variables must name"),
-        (ANY, ["A"], [], [{"city": "A", "variables": []}], "variables must name"),
-        (ANY, ["A"], [], [{"city": "A", "variables": ["rain", "rain"]}], "distinct"),
-        (ANY, ["A"], [HOT], [{"city": "A", "variables": ["rain"]}], "once"),
-        (ANY, ["B"], [HOT], [], "must be listed in examined"),
-        (ANY, ["A", "A"], [HOT], [], "distinct city names"),
-        (ANY, ["A"], "nope", [], "must be lists"),
-        (ANY, ["A"], [{"city": "A"}], [], "each alert must hold"),
-        (ANY, ["A"], [], [{"city": "A"}], "each unavailable entry must hold"),
-    ],
-)
-def test_checks_a_judgement_under_its_task(task, examined, alerts, unavailable, problem) -> None:
-    found = judgement_problem(task, examined, alerts, unavailable)
-    assert (found is None) == (problem is None), found
-    if problem:
-        assert problem in found
+def test_all_and_any_and_the_unavailable() -> None:
+    hot = day_metrics(series("2026-07-06T23:00", "2026-07-07T23:00", 60, {"temperature_2m": 36.0, "precipitation": 0.0}), 1)
+    conditions = parse_conditions(["max_temp >= 95", "rain > 0.5"])
+    units = Units("F", "kmh", "in")
+    assert [alert.city for alert in evaluate([hot], conditions, "any", units).alerts] == ["London"]
+    assert not evaluate([hot], conditions, "all", units).alerts
+    missing = series("2026-07-06T23:00", "2026-07-07T23:00", 60, {"temperature_2m": 36.0})
+    missing["temperature_2m"] = [None] * len(missing["times"])
+    found = evaluate([day_metrics(missing, 1)], conditions, "any", units)
+    assert not found.alerts and found.unavailable == {"London": ("max_temp",)}
 
 
-def test_checks_a_report_file() -> None:
-    report = {"date": "2026-08-01", "run": "0123456789abcdef", "task": ANY, "examined": ["A"], "alerts": [HOT], "unavailable": []}
-    assert report_problem(report) is None
-    assert "must hold date, run, task" in report_problem({key: value for key, value in report.items() if key != "task"})
-    assert "run must be" in report_problem({**report, "run": ""})
-    assert "task:" in report_problem({**report, "task": {**ANY, "match": "some"}})
-    assert "not its task's" in report_problem({**report, "date": "2026-08-02"})
-    assert "must be listed in examined" in report_problem({**report, "examined": ["B"]})
-    assert report_problem("nope") is not None
+def test_the_cities_are_thirty_in_order() -> None:
+    assert len(CITY_NAMES) == 30 and list(CITY_NAMES) == sorted(CITY_NAMES)
+    assert DataKind.OUTLOOK.value == "outlook"
+    assert day_number("1970-01-02") == 1
+    assert (EPOCH + timedelta(minutes=CLOCK)).isoformat() == "2026-10-16T04:00:00+00:00"

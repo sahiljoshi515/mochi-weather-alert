@@ -1,146 +1,96 @@
-"""pin_alerts (the daily-alert reference) and the daily-alert task's verdict on the submitted report."""
+"""pin_alerts, the daily-alert answer key: its input, and the data it pins, checked by hand."""
 
-from .checks import date_check, day_problem, names_problem, result
-from .report import compare, entries_by_city, entries_of, saved_report
+from .checks import plain_candidate, result
 from .rules import (
-    Units,
-    canonical_task,
-    evaluate,
-    expected_output,
-    judgement_problem,
-    metrics_from_plain,
-    parse_conditions,
+    DELTA_MINUTES,
+    SHA256,
+    choice_problem,
+    cities_problem,
+    date_text,
+    expected_from_series,
+    key_of,
     plain_entries,
     plain_task,
+    series_sha256,
+    source_problem,
+    stamp_minutes,
+    task_problem,
 )
 
 
-def conditions_check(value):
-    try:
-        parse_conditions(value.conditions)
-    except ValueError as error:
-        return result(False, str(error))
+def verify_input(value):
+    problem = task_problem(plain_task(value))
+    return result(False, problem) if problem else result(True, "input is valid")
+
+
+def candidate_shape_problem(task, candidate):
+    """What is wrong with one pinned source's data (a plain candidate), or None: its source and clock,
+    every city's local day and readings, its hash, and its own alerts, re-derived from its readings."""
+    source = candidate["source"]
+    problem = source_problem(source)
+    if problem:
+        return problem
+    clock = stamp_minutes(candidate["clock"])
+    if clock is None:
+        return "a pinned source's clock must be a UTC time"
+    if source["today"] != date_text(clock // 1440):
+        return f"a pinned source's today, {source['today']}, is not its clock's date"
+    if not isinstance(candidate["sha256"], str) or not SHA256.fullmatch(candidate["sha256"]):
+        return "a pinned source must carry the sha256 of its data"
+    problem = cities_problem(task["date"], source["step_hours"], candidate["cities"])
+    if problem:
+        return problem
+    if series_sha256(task["date"], key_of(source), candidate["cities"]) != candidate["sha256"]:
+        return f"the pinned {source['label']} does not match its own sha256"
+    expected = plain_entries(expected_from_series(task, source["step_hours"], candidate["cities"]))
+    if {"alerts": candidate["alerts"], "unavailable": candidate["unavailable"]} != expected:
+        return f"the alerts pinned with the {source['label']} disagree with its readings"
     return None
 
 
-def verify_input(value):
-    return date_check(value.date) or conditions_check(value) or result(True, "input is valid")
+def candidate_rules_problem(task, candidate):
+    """Whether one pinned source is the data the date rules choose at its clock, or None."""
+    source = candidate["source"]
+    problem = choice_problem(task["date"], stamp_minutes(candidate["clock"]), key_of(source), candidate["skipped"])
+    return f"the pinned {source['label']} breaks the date rules: {problem}" if problem else None
 
 
-def units_of(arguments):
-    return Units(arguments.temperature_unit.value, arguments.wind_unit.value, arguments.rain_unit.value)
-
-
-def metrics_of(reference):
-    return [
-        metrics_from_plain(
-            row.city,
-            row.hours,
-            row.max_temp_c,
-            row.min_temp_c,
-            row.rain_mm,
-            row.max_wind_kmh,
-            row.humidity_sum_pct,
-            row.humidity_hours,
-            row.missing,
-        )
-        for row in reference.metric
-    ]
-
-
-def expected_of(arguments, reference):
-    """The alerts the pinned metric aggregates give under the task's rules: the pin's own alert list
-    is never trusted."""
-    conditions = parse_conditions(arguments.conditions)
-    return evaluate(metrics_of(reference), conditions, arguments.match.value, units_of(arguments))
+def pin_problems(task, pin):
+    """(what is wrong with the pinned data's shape, what is wrong with its choice of data), each None
+    when nothing is: one or two candidates with distinct sources, read at the pin's clock and
+    DELTA_MINUTES before it, each well formed and the data the rules choose at its reading."""
+    if pin.date != task["date"]:
+        return "the answer key is for another date", None
+    clock = stamp_minutes(pin.clock)
+    if clock is None:
+        return "the answer key's clock must be a UTC time", None
+    candidates = [plain_candidate(candidate) for candidate in pin.candidates]
+    if not 1 <= len(candidates) <= 2:
+        return "the answer key must pin one or two sources", None
+    if len({tuple(key_of(candidate["source"])) for candidate in candidates}) != len(candidates):
+        return "the answer key pins the same source twice", None
+    readings = {stamp_minutes(candidate["clock"]) for candidate in candidates}
+    if not readings <= {clock - DELTA_MINUTES, clock} or len(readings) != len(candidates):
+        return f"each pinned source must be read at the answer key's clock or {DELTA_MINUTES} minutes before it", None
+    for candidate in candidates:
+        problem = candidate_shape_problem(task, candidate)
+        if problem:
+            return problem, None
+    for candidate in candidates:
+        problem = candidate_rules_problem(task, candidate)
+        if problem:
+            return None, problem
+    return None, None
 
 
 def verify_output(input_value, output_value, workspace):
-    if output_value.date != input_value.date:
-        return result(False, "the pin is for another date")
-    problem = names_problem([row.city for row in output_value.metric], what="metric cities")
-    if problem or not output_value.metric:
-        return result(False, problem or "no city is pinned")
-    for row in output_value.metric:
-        problem = day_problem(row, humidity=row.humidity_sum_pct)
-        if problem:
-            return result(False, problem)
-        if not 0 <= row.humidity_hours <= row.hours or (row.humidity_sum_pct is None) != (row.humidity_hours == 0):
-            return result(False, f"{row.city}: the humidity sum and its hour count disagree")
-    expected = expected_of(input_value, output_value)
-    own = {"examined": [row.city for row in output_value.metric], **entries_of(output_value)}
-    pinned = {"examined": list(expected.examined), **plain_entries(expected)}
-    if own != pinned:
-        return result(False, "the pin's alerts disagree with its own metric aggregates")
+    task = plain_task(input_value)
+    shape, rules = pin_problems(task, output_value)
+    if shape or rules:
+        return result(False, shape or rules)
     return result(
         True,
-        "the day is pinned",
-        cities=len(output_value.metric),
-        alerts=len(output_value.alerts),
-        unavailable=len(output_value.unavailable),
+        "the data is pinned",
+        sources=[candidate.source.label for candidate in output_value.candidates],
+        alerts=[len(candidate.alerts) for candidate in output_value.candidates],
     )
-
-
-def verify_task(arguments, output, reference, workspace):
-    """Approve the submitted report only when it is the report this run saved with every city
-    examined, and holds exactly the alerts the pinned aggregates give, each with exactly the expected
-    values and matched conditions, and exactly the unavailable cities."""
-    if reference is None:
-        return result(False, "no pinned reference", score=0.0)
-    problem = date_check(arguments.date) or conditions_check(arguments)
-    if problem:
-        return result(False, problem["message"], score=0.0)
-    if reference.date != arguments.date:
-        return result(False, "the pinned day is another date", score=0.0)
-    task = plain_task(arguments)
-    expected = expected_of(arguments, reference)
-    report = {
-        "expected": expected_output(task, expected),
-        "conditions": [condition.text for condition in parse_conditions(arguments.conditions)],
-        "match": arguments.match.value,
-        "units": {
-            "temperature": arguments.temperature_unit.value,
-            "wind": arguments.wind_unit.value,
-            "rain": arguments.rain_unit.value,
-        },
-        "cities": len(reference.metric),
-    }
-    if canonical_task(plain_task(output.task)) != canonical_task(task):
-        return result(False, "the submitted report is for another task input: submit the report the last report_alerts call returned", score=0.0, **report)
-    submitted = entries_of(output)
-    problem = judgement_problem(task, None, submitted["alerts"], submitted["unavailable"])
-    if problem:
-        return result(False, f"the submitted report is malformed: {problem}", score=0.0, **report)
-    saved, problem = saved_report(workspace, arguments.date)
-    if problem:
-        return result(False, problem, score=0.0, **report)
-    if canonical_task(saved["task"]) != canonical_task(task):
-        return result(False, "the saved report is for another task input", score=0.0, **report)
-    cities = set(expected.examined)
-    examined = set(saved["examined"])
-    coverage = {
-        "examined": len(examined & cities),
-        "unexamined": sorted(cities - examined),
-        "unknown_examined": sorted(examined - cities),
-    }
-    score, problems, differences = compare(expected, submitted)
-    counts = f"{len(expected.alerts)} alert(s) and {len(expected.unavailable)} unavailable city(ies)"
-    if entries_by_city(saved) != entries_by_city(submitted):
-        message = "the submitted report differs from the saved report: submit the report the last report_alerts call returned, as it is"
-        return result(False, message, score=0.0, **differences, **coverage, **report)
-    if coverage["unexamined"] or coverage["unknown_examined"]:
-        # Every city must be judged: the entries' F1 is scaled by the share of the pinned cities among
-        # the pinned and the examined ones, so an unexamined city and a name not in the snapshot both cost.
-        score = score * len(examined & cities) / len(examined | cities)
-        parts = []
-        if coverage["unexamined"]:
-            named = ", ".join(coverage["unexamined"][:5]) + (", …" if len(coverage["unexamined"]) > 5 else "")
-            parts.append(f"{len(coverage['unexamined'])} city(ies) unexamined ({named})")
-        if coverage["unknown_examined"]:
-            parts.append(f"{len(coverage['unknown_examined'])} examined name(s) not in the snapshot")
-        message = "; ".join(parts + problems)
-        return result(False, f"{message}: expected all {len(cities)} cities examined and exactly {counts} (F1 {score:.2f})", score=score, **differences, **coverage, **report)
-    if problems:
-        message = f"{'; '.join(problems)}: expected exactly {counts} (F1 {score:.2f})"
-        return result(False, message, score=score, **differences, **coverage, **report)
-    return result(True, f"every city examined, exactly the {counts}", score=score, **coverage, **report)

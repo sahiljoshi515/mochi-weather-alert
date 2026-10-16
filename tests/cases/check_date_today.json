@@ -1,0 +1,12 @@
+{
+ "note": "Today's date and its data.",
+ "task": "check-date",
+ "arguments": {
+  "date": "today"
+ },
+ "steps": [],
+ "expect": {
+  "valid": true,
+  "score_min": 1.0
+ }
+}

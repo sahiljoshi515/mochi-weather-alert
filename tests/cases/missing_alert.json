@@ -1,0 +1,92 @@
+{
+ "note": "The first alert city left out.",
+ "task": "daily-alert",
+ "arguments": {
+  "date": "2026-07-07",
+  "match": "any",
+  "temperature_unit": "F",
+  "wind_unit": "mph",
+  "rain_unit": "in",
+  "conditions": [
+   "max_temp >= 95",
+   "humidity >= 85",
+   "rain > 0.5",
+   "wind >= 20"
+  ]
+ },
+ "steps": [
+  {
+   "tool": "get_daily",
+   "arguments": {
+    "task": {
+     "date": "2026-07-07",
+     "match": "any",
+     "temperature_unit": "F",
+     "wind_unit": "mph",
+     "rain_unit": "in",
+     "conditions": [
+      "max_temp >= 95",
+      "humidity >= 85",
+      "rain > 0.5",
+      "wind >= 20"
+     ]
+    },
+    "cities": [
+     "Athens",
+     "Auckland",
+     "Bangkok",
+     "Buenos Aires",
+     "Cairo",
+     "Cape Town",
+     "Denver",
+     "Dubai",
+     "Honolulu",
+     "Houston",
+     "Jakarta",
+     "Lagos",
+     "Lima",
+     "London",
+     "Madrid",
+     "Mexico City",
+     "Moscow",
+     "Mumbai",
+     "Nairobi",
+     "Oslo",
+     "Perth",
+     "Phoenix",
+     "Reykjavik",
+     "Santiago",
+     "Seoul",
+     "Singapore",
+     "Sydney",
+     "Tokyo",
+     "Toronto",
+     "Vancouver"
+    ]
+   },
+   "save_as": "daily"
+  },
+  {
+   "python": "\"\"\"A scripted agent's judgement, written from the task's instructions alone (it imports nothing of the\nplugin): given get_daily's answer and the task input, the report_alerts calls of the prescribed path,\nor the same calls broken in one way a weak agent breaks them.\n\nThe scripted cases inline this file into a python step (tools_dev/build_cases.py), so a case judges\nwhatever data the plugin fetched on the day it runs; the offline replay test imports it.\n\"\"\"\n\nimport re\nfrom decimal import ROUND_HALF_EVEN, ROUND_HALF_UP, Decimal\n\nCITIES = [\n    \"Athens\", \"Auckland\", \"Bangkok\", \"Buenos Aires\", \"Cairo\", \"Cape Town\", \"Denver\", \"Dubai\", \"Honolulu\", \"Houston\",\n    \"Jakarta\", \"Lagos\", \"Lima\", \"London\", \"Madrid\", \"Mexico City\", \"Moscow\", \"Mumbai\", \"Nairobi\", \"Oslo\",\n    \"Perth\", \"Phoenix\", \"Reykjavik\", \"Santiago\", \"Seoul\", \"Singapore\", \"Sydney\", \"Tokyo\", \"Toronto\", \"Vancouver\",\n]  # fmt: skip\nSOURCE = {\"max_temp\": \"temperature_2m\", \"min_temp\": \"temperature_2m\", \"rain\": \"precipitation\", \"wind\": \"wind_speed_10m\", \"humidity\": \"relative_humidity_2m\"}\nORDER = (\"max_temp\", \"min_temp\", \"rain\", \"wind\", \"humidity\")\nHALF = 15\n\n\nclass NotApplicable(Exception):\n    \"\"\"The day's data offers no city to break the report this way.\"\"\"\n\n\ndef parse(text):\n    variable, op, number = re.fullmatch(r\"\\s*(\\w+)\\s*(>=|<=|>|<)\\s*([+-]?[0-9]*\\.?[0-9]+)\\s*\", text).groups()\n    return text, variable, op, Decimal(number)\n\n\ndef test(value, op, threshold, strict_ge=False):\n    if op == \">=\":\n        return value > threshold if strict_ge else value >= threshold\n    if op == \">\":\n        return value > threshold\n    if op == \"<=\":\n        return value <= threshold\n    return value < threshold\n\n\ndef rounded(value, rounding=ROUND_HALF_UP):\n    return float(value.quantize(Decimal(\"0.1\"), rounding=rounding))\n\n\ndef judge(task, daily, *, match=None, strict_ge=False, rounding=ROUND_HALF_UP):\n    \"\"\"Every city's judgement under the instructions: {\"alerts\", \"unavailable\"}, in city order.\"\"\"\n    match = match or task[\"match\"]\n    conditions = [parse(text) for text in task[\"conditions\"]]\n    needed = [variable for variable in ORDER if any(condition[1] == variable for condition in conditions)]\n    alerts, unavailable = [], []\n    rows = {row[\"city\"]: row for row in daily[\"cities\"]}\n    for city in CITIES:\n        row = rows[city]\n        lacking = [variable for variable in needed if SOURCE[variable] in row[\"missing\"] or variable not in row[\"values\"]]\n        if lacking:\n            unavailable.append({\"city\": city, \"variables\": lacking})\n            continue\n        values = {variable: Decimal(str(row[\"values\"][variable])) for variable in needed}\n        matched = [text for text, variable, op, threshold in conditions if test(values[variable], op, threshold, strict_ge)]\n        if (match == \"all\" and len(matched) == len(conditions)) or (match == \"any\" and matched):\n            alerts.append({\"city\": city, \"values\": {variable: rounded(values[variable], rounding) for variable in needed}, \"matched\": matched})\n    return {\"alerts\": alerts, \"unavailable\": unavailable}\n\n\ndef call(task, judgement, cities):\n    covered = set(cities)\n    return {\n        \"task\": task,\n        \"examined\": list(cities),\n        \"alerts\": [entry for entry in judgement[\"alerts\"] if entry[\"city\"] in covered],\n        \"unavailable\": [entry for entry in judgement[\"unavailable\"] if entry[\"city\"] in covered],\n    }\n\n\ndef halves(task, judgement):\n    return [call(task, judgement, CITIES[:HALF]), call(task, judgement, CITIES[HALF:])]\n\n\ndef available_non_alert(task, daily, judgement):\n    \"\"\"A city with every needed value that is no alert, with its values rounded as a report gives them.\"\"\"\n    taken = {entry[\"city\"] for entry in judgement[\"alerts\"] + judgement[\"unavailable\"]}\n    rows = {row[\"city\"]: row for row in daily[\"cities\"]}\n    needed = [variable for variable in ORDER if any(parse(text)[1] == variable for text in task[\"conditions\"])]\n    for city in CITIES:\n        if city not in taken and all(variable in rows[city][\"values\"] for variable in needed):\n            return city, {variable: rounded(Decimal(str(rows[city][\"values\"][variable]))) for variable in needed}\n    raise NotApplicable(\"every city is an alert or unavailable\")\n\n\ndef mutated(name, task, daily):\n    \"\"\"The judgement broken one way (``name``), or NotApplicable when the day's data offers no case.\"\"\"\n    gold = judge(task, daily)\n    if name == \"boundary\":  # >= taken as >\n        broken = judge(task, daily, strict_ge=True)\n    elif name == \"bankers\":  # half-even rounding\n        broken = judge(task, daily, rounding=ROUND_HALF_EVEN)\n    elif name == \"any_vs_all\":\n        broken = judge(task, daily, match=\"all\" if task[\"match\"] == \"any\" else \"any\")\n    elif name == \"missing_alert\":\n        if not gold[\"alerts\"]:\n            raise NotApplicable(\"no alert to drop\")\n        broken = {**gold, \"alerts\": gold[\"alerts\"][1:]}\n    elif name == \"extra_alert\":\n        city, values = available_non_alert(task, daily, gold)\n        extra = {\"city\": city, \"values\": values, \"matched\": [task[\"conditions\"][0]]}\n        broken = {**gold, \"alerts\": sorted(gold[\"alerts\"] + [extra], key=lambda entry: CITIES.index(entry[\"city\"]))}\n    elif name == \"fabricated\":  # one value off by 0.1\n        if not gold[\"alerts\"]:\n            raise NotApplicable(\"no alert to change\")\n        first = dict(gold[\"alerts\"][0])\n        variable = next(iter(first[\"values\"]))\n        first[\"values\"] = {**first[\"values\"], variable: round(first[\"values\"][variable] + 0.1, 1)}\n        broken = {**gold, \"alerts\": [first] + gold[\"alerts\"][1:]}\n    elif name == \"wrong_matched\":  # a holding condition left out of matched\n        target = next((entry for entry in gold[\"alerts\"] if len(entry[\"matched\"]) > 1), None)\n        if target is None or task[\"match\"] == \"all\":\n            raise NotApplicable(\"no alert matches two conditions under any\")\n        changed = {**target, \"matched\": target[\"matched\"][:-1]}\n        broken = {**gold, \"alerts\": [changed if entry is target else entry for entry in gold[\"alerts\"]]}\n    elif name == \"drop_unavailable\":\n        if not gold[\"unavailable\"]:\n            raise NotApplicable(\"no unavailable city\")\n        broken = {**gold, \"unavailable\": gold[\"unavailable\"][1:]}\n    elif name == \"empty\":\n        if not gold[\"alerts\"] and not gold[\"unavailable\"]:\n            raise NotApplicable(\"the gold report is already empty\")\n        broken = {\"alerts\": [], \"unavailable\": []}\n    else:\n        raise ValueError(f\"unknown mutation {name}\")\n    if broken == gold:\n        raise NotApplicable(f\"{name} changes nothing on this day\")\n    return broken\n\n\ndef plan(task, daily, mutations=()):\n    \"\"\"The report_alerts calls: gold when ``mutations`` is empty, else the first applicable mutation's.\n    Returns {\"calls\": [...], \"applied\": name or \"gold\", \"skipped\": [...names not applicable]}.\"\"\"\n    skipped = []\n    for name in mutations:\n        try:\n            return {\"calls\": halves(task, mutated(name, task, daily)), \"applied\": name, \"skipped\": skipped}\n        except NotApplicable:\n            skipped.append(name)\n    if mutations:\n        raise NotApplicable(f\"none of {list(mutations)} applies to this day's data\")\n    return {\"calls\": halves(task, judge(task, daily)), \"applied\": \"gold\", \"skipped\": skipped}\n\nTASK = {\"date\": \"2026-07-07\", \"match\": \"any\", \"temperature_unit\": \"F\", \"wind_unit\": \"mph\", \"rain_unit\": \"in\", \"conditions\": [\"max_temp >= 95\", \"humidity >= 85\", \"rain > 0.5\", \"wind >= 20\"]}\noutputs['plan'] = plan(TASK, outputs['daily'], ['missing_alert'])\n"
+  },
+  {
+   "tool": "report_alerts",
+   "arguments": "$ref:plan.calls.0"
+  },
+  {
+   "tool": "report_alerts",
+   "arguments": "$ref:plan.calls.1",
+   "save_as": "last"
+  },
+  {
+   "tool": "submit",
+   "arguments": "$ref:last.report"
+  }
+ ],
+ "answer": "Reported every alert and unavailable city.",
+ "expect": {
+  "valid": false,
+  "score_max": 0.99,
+  "message_contains": "Missing alert"
+ }
+}

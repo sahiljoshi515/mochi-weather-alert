@@ -1,65 +1,43 @@
 """report_alerts: a well-formed call at input, the merged report at output, and the comparison of a
-judgement with the expected alerts that verify_task scores."""
+judgement with the expected alerts that the task's verdict scores."""
 
-import json
 from decimal import Decimal
 from pathlib import Path
 
-from .checks import result
+from .checks import REPORT_DIR, entries_by_city, entries_of, read_json, result, run_of
+from .daily import cities_problem
+from .receipt import receipt_of
 from .rules import (
     CITY_COUNT,
     MAX_REPORT_ENTRIES,
     canonical_conditions,
     canonical_task,
     judgement_problem,
+    plain_source,
     plain_task,
     report_problem,
     task_problem,
 )
-
-# The report lives in the run's folder, which is the member's own folder for this plugin.
-REPORT_DIR = "reports"
-RUN_MARKER = "run.json"
-NO_MARKER = "no run marker in the workspace: the plugin did not start here"
 
 
 def report_path(date):
     return f"{REPORT_DIR}/{date}.json"
 
 
-def report_file(workspace, date):
-    return Path(workspace) / REPORT_DIR / f"{date}.json"
-
-
-def run_of(workspace):
-    """The run marker the plugin process wrote at its start (reports/run.json), or None."""
-    path = Path(workspace) / REPORT_DIR / RUN_MARKER
-    if not path.is_file():
-        return None
-    try:
-        found = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        return None
-    run = found.get("run") if isinstance(found, dict) else None
-    return run if isinstance(run, str) and run.strip() else None
-
-
 def saved_report(workspace, date):
     """(the report file as JSON, None) or (None, why it is not a report of this run)."""
-    path = report_file(workspace, date)
     where = report_path(date)
-    if not path.is_file():
+    found, problem = read_json(Path(workspace) / where)
+    if problem == "missing":
         return None, f"no report at {where}: call report_alerts for every city before submitting"
-    try:
-        found = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        return None, f"{where} is not a report of this run: not JSON"
+    if problem:
+        return None, f"{where} is not a report of this run: {problem}"
     problem = report_problem(found)
     if problem:
         return None, f"{where} is not a report of this run: {problem}"
     run = run_of(workspace)
     if run is None:
-        return None, NO_MARKER
+        return None, "no run marker in the workspace: the plugin did not start here"
     if found["run"] != run:
         return None, f"{where} is not a report of this run: it was left by an earlier one"
     if found["date"] != date:
@@ -67,49 +45,40 @@ def saved_report(workspace, date):
     return found, None
 
 
-def entries_of(value):
-    """The alerts and unavailable cities of a contract ReportInput, AlertReportOutput or PinOutput, as JSON."""
-    return {
-        "alerts": [{"city": a.city, "values": dict(a.values), "matched": list(a.matched)} for a in value.alerts],
-        "unavailable": [{"city": u.city, "variables": list(u.variables)} for u in value.unavailable],
-    }
-
-
-def entries_by_city(judgement):
-    return {entry["city"]: entry for entry in judgement["alerts"]}, {entry["city"]: entry for entry in judgement["unavailable"]}
-
-
 def verify_input(value):
     task = plain_task(value.task)
-    problem = task_problem(task)
+    problem = task_problem(task) or cities_problem(list(value.examined), MAX_REPORT_ENTRIES)
     if problem:
         return result(False, problem)
-    if not isinstance(value.examined, list) or not 1 <= len(value.examined) <= MAX_REPORT_ENTRIES:
-        return result(False, f"examined must name 1 to {MAX_REPORT_ENTRIES} distinct cities")
     entries = entries_of(value)
     problem = judgement_problem(task, list(value.examined), entries["alerts"], entries["unavailable"])
-    if problem:
-        return result(False, problem)
-    return result(True, "input is valid")
+    return result(False, problem) if problem else result(True, "input is valid")
 
 
 def verify_output(input_value, output_value, workspace):
-    """The file is a report of this run for this task and records this call's examined cities, and the
-    returned report holds this call's judgement of every city it examined. Nothing cumulative is
-    checked against the file: other calls of the same turn may have merged more since."""
+    """The file is a report of this run for this task on the data this run read, and records this call's
+    examined cities; the returned report names that data and holds this call's judgement of every city
+    it examined. Nothing cumulative is checked against the file: other calls may have merged since."""
     task = plain_task(input_value.task)
     date = task["date"]
-    if output_value.path != report_path(date) or not report_file(workspace, date).is_file():
+    if output_value.path != report_path(date):
         return result(False, f"the report is not at {report_path(date)}")
     saved, problem = saved_report(workspace, date)
     if problem:
         return result(False, problem)
+    receipt, problem = receipt_of(workspace, date)
+    if problem:
+        return result(False, problem)
     if canonical_task(saved["task"]) != canonical_task(task):
         return result(False, "the saved report is for another task input")
+    if saved["source"] != receipt["source"] or saved["sha256"] != receipt["sha256"]:
+        return result(False, "the saved report does not name the data get_daily read")
     if not set(input_value.examined) <= set(saved["examined"]):
         return result(False, "the saved report does not record this call's examined cities")
     if canonical_task(plain_task(output_value.report.task)) != canonical_task(task):
         return result(False, "the returned report is for another task input")
+    if plain_source(output_value.report.data) != receipt["source"]:
+        return result(False, "the returned report does not name the data get_daily read")
     returned = entries_of(output_value.report)
     problem = judgement_problem(task, None, returned["alerts"], returned["unavailable"])
     if problem:
@@ -123,14 +92,7 @@ def verify_output(input_value, output_value, workspace):
         return result(False, f"examined must count this call's cities and at most the {CITY_COUNT} cities")
     if output_value.complete != (output_value.examined == CITY_COUNT):
         return result(False, "complete must say whether every city is examined")
-    return result(
-        True,
-        "report is saved",
-        examined=output_value.examined,
-        complete=output_value.complete,
-        alerts=len(input_value.alerts),
-        unavailable=len(input_value.unavailable),
-    )
+    return result(True, "report is saved", examined=output_value.examined, complete=output_value.complete)
 
 
 def exact(value):
@@ -139,14 +101,9 @@ def exact(value):
 
 
 def compare(expected, judgement):
-    """Score a well-formed ``judgement`` ({"alerts", "unavailable"} as JSON) against the ``expected``
-    alerts (a rules.Expected).
-
-    Every entry is an item, (alert, city) or (unavailable, city); an item counts as a hit only
-    when it is exactly right: an alert's values and matched conditions, an unavailable entry's
-    variables. The score is the F1 of the judgement's items against the expected ones, so it is 1.0
-    only for an exact match. Returns (score, problems, differences).
-    """
+    """Compare a well-formed ``judgement`` ({"alerts", "unavailable"} as JSON) with the ``expected``
+    alerts (a rules.Expected). Every entry is an item, (alert, city) or (unavailable, city); an item is
+    a hit only when it is exactly right. Returns (F1 of the items, differences)."""
     want_alerts = {alert.city: alert for alert in expected.alerts}
     want_unavailable = dict(expected.unavailable)
     got_alerts = {alert["city"]: alert for alert in judgement["alerts"]}
@@ -182,26 +139,10 @@ def compare(expected, judgement):
             hits += 1
     for city in sorted(set(want_unavailable) & set(got_unavailable)):
         if set(got_unavailable[city]) != set(want_unavailable[city]):
-            differences["unavailable_mismatches"][city] = {
-                "expected": list(want_unavailable[city]),
-                "reported": list(got_unavailable[city]),
-            }
+            differences["unavailable_mismatches"][city] = {"expected": list(want_unavailable[city]), "reported": list(got_unavailable[city])}
         else:
             hits += 1
     submitted = len(got_alerts) + len(got_unavailable)
     wanted = len(want_alerts) + len(want_unavailable)
     score = 2 * hits / (submitted + wanted) if submitted or wanted else 1.0
-    problems = []
-    for key, noun in (
-        ("missing_alerts", "alert(s) missing"),
-        ("extra_alerts", "extra alert(s)"),
-        ("value_mismatches", "alert(s) with a wrong value"),
-        ("matched_mismatches", "alert(s) with wrong matched conditions"),
-        ("missing_unavailable", "unavailable city(ies) missing"),
-        ("extra_unavailable", "extra unavailable city(ies)"),
-        ("unavailable_mismatches", "unavailable city(ies) with wrong variables"),
-    ):
-        count = len(differences[key])
-        if count:
-            problems.append(f"{count} {noun}")
-    return score, problems, differences
+    return score, differences

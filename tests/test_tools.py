@@ -1,260 +1,113 @@
-"""The tools on the real snapshot: what they give, how fast, how compact, and how they fail."""
+"""The tools as the agent and the host call them: get_daily's values and receipt, report_alerts'
+merging and refusals, the answer key, the date check, and the call log."""
 
 from __future__ import annotations
 
 import json
-import time
-from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
-from decimal import Decimal
-from fractions import Fraction
 from pathlib import Path
 
 import pytest
+import scripted_judge
+from conftest import T0
+from helpers import Run, task_for
 from slimconfig import build_output, plain_output
 
-from contract import AlertInput, CitiesInput, DailyInput, HourlyInput, ReportInput
-from plugin.alerts import RUN, get_daily, get_hourly, list_cities, pin_alerts, report_alerts
-from plugin.data import snapshot
-from plugin.rules import Units, aggregate, given_values, metrics_from_plain, parse_conditions, truncate
-
-DATE = "2026-09-06"
-ARGUMENTS = {"date": DATE, "match": "any", "temperature_unit": "F", "wind_unit": "mph", "rain_unit": "in", "conditions": ["max_temp >= 95", "rain > 0.5"]}
-NAMES = [city.name for city in snapshot().cities]
+from contract import AlertInput, DailyInput, DateInput, ReportInput
+from plugin import alerts
+from plugin.rules import CITY_NAMES, Units, day_metrics, given_values, parse_conditions
 
 
-def test_pin_alerts_pins_every_city_fast(tmp_path: Path) -> None:
-    started = time.perf_counter()
-    pinned = pin_alerts(build_output(ARGUMENTS, AlertInput), tmp_path)
-    assert time.perf_counter() - started < 5
-    assert pinned.date == DATE and [row.city for row in pinned.metric] == NAMES
-    santiago = next(row for row in pinned.metric if row.city == "Santiago")
-    assert santiago.hours == 23 and santiago.humidity_hours == 23 and santiago.missing == []
-    assert all(row.hours == 24 for row in pinned.metric if row.city != "Santiago")
-    alerted = {alert.city for alert in pinned.alerts}
-    for alert in pinned.alerts:
-        assert set(alert.values) == {"max_temp", "rain"} and alert.matched
-    assert pinned.unavailable == []
-    hot = {row.city for row in pinned.metric if Fraction(Decimal(str(row.max_temp_c))) * 9 / 5 + 32 >= 95}
-    wet = {row.city for row in pinned.metric if Fraction(Decimal(str(row.rain_mm))) / Fraction("25.4") > Fraction("0.5")}
-    assert alerted == hot | wet
+def test_get_daily_gives_each_needed_value_in_the_task_units_and_writes_a_receipt(offline) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    daily = run.read()
+    assert daily["source"]["label"] == "ECMWF IFS archive (analysis), hourly" and daily["source"]["today"] == "2026-10-16"
+    assert [row["city"] for row in daily["cities"]] == list(CITY_NAMES)
+    assert all(set(row) == {"city", "samples", "missing", "values"} for row in daily["cities"])
+    assert all(set(row["values"]) == {"max_temp", "rain", "wind", "humidity"} and row["samples"] == 24 for row in daily["cities"])
+    receipt = json.loads((run.workspace / "reports" / "2026-07-07.source.json").read_text())
+    assert receipt["run"] == alerts.RUN and receipt["sha256"] == run.pin.candidates[0].sha256
+    task = run.task
+    conditions = parse_conditions(task["conditions"])
+    units = Units(task["temperature_unit"], task["wind_unit"], task["rain_unit"])
+    for row, series in zip(daily["cities"], receipt["cities"], strict=True):
+        assert row["values"] == {name: float(value) for name, value in given_values(day_metrics(series, 1), conditions, units).items()}
+    # about 1,300 tokens for four variables: 0.3.1's answer plus the source (about 200 characters)
+    assert len(json.dumps(daily, separators=(",", ":"))) < 4500, "get_daily's answer stays small for the hosted model"
 
 
-@pytest.mark.parametrize(
-    ("change", "error"),
-    [
-        ({"date": "2026-10-01"}, "outside the snapshot"),
-        ({"date": "2026-09-31"}, "not a calendar day"),
-        ({"conditions": ["max_temp >= 95", "max_temp >= 95.0"]}, "given twice"),
-        ({"conditions": ["hot > 1"]}, "not a condition"),
-        ({"conditions": []}, "1 to 6"),
-    ],
-)
-def test_pin_alerts_refuses_bad_input(tmp_path: Path, change: dict, error: str) -> None:
-    with pytest.raises(ValueError, match=error):
-        pin_alerts(build_output({**ARGUMENTS, **change}, AlertInput), tmp_path)
+def test_get_daily_refuses_unknown_and_repeated_cities(offline) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    with pytest.raises(ValueError, match="unknown city Atlantis"):
+        alerts.get_daily(build_output({"task": run.task, "cities": ["Atlantis"]}, DailyInput), run.workspace)
+    with pytest.raises(ValueError, match="distinct"):
+        alerts.get_daily(build_output({"task": run.task, "cities": ["Oslo", "Oslo"]}, DailyInput), run.workspace)
 
 
-def test_list_cities_gives_every_city_with_its_day_length(tmp_path: Path) -> None:
-    listed = list_cities(build_output({"date": DATE}, CitiesInput), tmp_path)
-    assert [row.city for row in listed.cities] == NAMES
-    assert {row.city: row.hours_available for row in listed.cities if row.hours_available != 24} == {"Santiago": 23}
-    assert next(row for row in listed.cities if row.city == "Auckland").timezone == "Pacific/Auckland"
-    later = list_cities(build_output({"date": "2026-09-27"}, CitiesInput), tmp_path)
-    assert {row.city: row.hours_available for row in later.cities if row.hours_available != 24} == {"Auckland": 23}
-    assert len(json.dumps(plain_output(listed))) < 3500
-    with pytest.raises(ValueError, match="outside the snapshot"):
-        list_cities(build_output({"date": "2026-06-30"}, CitiesInput), tmp_path)
+def test_report_alerts_needs_the_data_read_first(offline) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    call = {"task": run.task, "examined": ["Oslo"], "alerts": [], "unavailable": []}
+    with pytest.raises(ValueError, match="call get_daily for 2026-07-07 first"):
+        alerts.report_alerts(build_output(call, ReportInput), run.workspace)
 
 
-def daily(cities, task=ARGUMENTS):
-    return build_output({"task": task, "cities": list(cities)}, DailyInput)
+def test_report_alerts_merges_halves_restates_cities_and_names_its_data(offline) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    run.read()
+    gold = scripted_judge.judge(run.task, run.daily)
+    first, second = scripted_judge.halves(run.task, gold)
+    out = run.report([first])
+    assert out["examined"] == 15 and not out["complete"] and out["report"]["data"] == run.daily["source"]
+    out = run.report([second])
+    assert out["examined"] == 30 and out["complete"]
+    saved = json.loads((run.workspace / "reports" / "2026-07-07.json").read_text())
+    assert saved["sha256"] == run.pin.candidates[0].sha256 and saved["source"] == run.daily["source"]
+    # restating a city replaces its entry: a call that examines an alert city with no entry removes its alert
+    city = out["report"]["alerts"][0]["city"]
+    out = run.report([{"task": run.task, "examined": [city], "alerts": [], "unavailable": []}])
+    assert not any(entry["city"] == city for entry in out["report"]["alerts"]) and out["complete"]
 
 
-def test_get_daily_gives_the_needed_values_in_the_tasks_units(tmp_path: Path) -> None:
-    found = get_daily(daily(NAMES[:10]), tmp_path)
-    assert [row.city for row in found.cities] == NAMES[:10]
-    pinned = {row.city: row for row in pin_alerts(build_output(ARGUMENTS, AlertInput), tmp_path).metric}
-    conditions = parse_conditions(ARGUMENTS["conditions"])
-    units = Units("F", "mph", "in")
-    for row in found.cities:
-        pin = pinned[row.city]
-        assert (row.hours, row.missing) == (pin.hours, pin.missing)
-        assert set(row.values) == {"max_temp", "rain"}
-        metrics = metrics_from_plain(pin.city, pin.hours, pin.max_temp_c, pin.min_temp_c, pin.rain_mm, pin.max_wind_kmh, pin.humidity_sum_pct, pin.humidity_hours, pin.missing)
-        assert {k: Decimal(str(v)) for k, v in row.values.items()} == given_values(metrics, conditions, units)
-    athens = next(row for row in found.cities if row.city == "Athens")
-    assert athens.values["max_temp"] == float(Decimal(str(pinned["Athens"].max_temp_c)) * 9 / 5 + 32)  # exact at 2 decimals
-    assert athens.values["rain"] == float(truncate(Fraction(Decimal(str(pinned["Athens"].rain_mm))) / Fraction("25.4")))
-    assert len(json.dumps(plain_output(found))) < 1200
-    everything = get_daily(daily(NAMES), tmp_path)
-    assert [row.city for row in everything.cities] == NAMES
-    assert len(json.dumps(plain_output(everything))) < 3500  # under 1,000 tokens for the whole day
-    # the task's units and conditions choose the values: wind in m/s, humidity as the exact mean
-    metric = {**ARGUMENTS, "temperature_unit": "C", "wind_unit": "ms", "rain_unit": "mm", "conditions": ["wind >= 5", "humidity > 50"]}
-    other = get_daily(daily(["Athens"], task=metric), tmp_path).cities[0]
-    assert set(other.values) == {"wind", "humidity"}
-    assert other.values["wind"] == float(truncate(Fraction(Decimal(str(pinned["Athens"].max_wind_kmh))) / Fraction("3.6")))
-    assert other.values["humidity"] == float(truncate(Fraction(int(pinned["Athens"].humidity_sum_pct), pinned["Athens"].humidity_hours)))
-    assert other.values["humidity"] == 31.458333333  # 755/24, truncated
+def test_a_report_left_by_an_earlier_run_is_replaced_not_merged(offline) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    run.read()
+    (run.workspace / "reports" / "2026-07-07.json").write_text(json.dumps({"date": "2026-07-07", "run": "old", "examined": list(CITY_NAMES)}))
+    first = scripted_judge.halves(run.task, scripted_judge.judge(run.task, run.daily))[0]
+    assert run.report([first])["examined"] == 15
 
 
 @pytest.mark.parametrize(
-    ("cities", "error"),
+    ("change", "words"),
     [
-        (NAMES + ["Atlantis"], "1 to 30"),
-        ([], "1 to 30"),
-        (["Athens", "Athens"], "distinct"),
-        (["Athens", "Atlantis"], "unknown city Atlantis"),
-        (["athens"], "unknown city athens"),
+        ({"alerts": [{"city": "Oslo", "values": {"max_temp": 1.0}, "matched": ["max_temp >= 95"]}]}, "exactly the variables"),
+        ({"alerts": [{"city": "Oslo", "values": {"max_temp": 1.0, "rain": 0.0, "wind": 1.0, "humidity": 1.0}, "matched": ["wind > 1"]}]}, "does not have"),
+        ({"examined": ["Oslo"], "unavailable": [{"city": "Lima", "variables": ["rain"]}]}, "must be listed in examined"),
+        ({"examined": ["Oslo", "Oslo"]}, "distinct"),
     ],
 )
-def test_get_daily_refuses_bad_city_lists(tmp_path: Path, cities: list[str], error: str) -> None:
-    with pytest.raises(ValueError, match=error):
-        get_daily(daily(cities), tmp_path)
+def test_report_alerts_refuses_malformed_judgements(offline, change: dict, words: str) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    run.read()
+    call = {"task": run.task, "examined": ["Oslo"], "alerts": [], "unavailable": [], **change}
+    with pytest.raises(ValueError, match=words):
+        alerts.report_alerts(build_output(call, ReportInput), run.workspace)
 
 
-def test_get_daily_refuses_a_bad_task(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="outside the snapshot"):
-        get_daily(daily(["Athens"], task={**ARGUMENTS, "date": "2026-10-01"}), tmp_path)
-    with pytest.raises(ValueError, match="not a condition"):
-        get_daily(daily(["Athens"], task={**ARGUMENTS, "conditions": ["hot > 1"]}), tmp_path)
+def test_the_answer_key_refuses_a_date_too_far_ahead_naming_today(offline) -> None:
+    with pytest.raises(ValueError, match=r"Today is 2026-10-16 \(UTC\)"):
+        alerts.pin_alerts(build_output(task_for("2027-06-01"), AlertInput), Path("."))
 
 
-def test_get_hourly_gives_the_local_day_with_its_offsets(tmp_path: Path) -> None:
-    hours = get_hourly(build_output({"city": "Santiago", "date": DATE}, HourlyInput), tmp_path)
-    assert hours.timezone == "America/Santiago" and len(hours.rows) == 23
-    assert hours.rows[0].time == "2026-09-06T01:00-03:00" and hours.rows[-1].time == "2026-09-06T23:00-03:00"
-    assert all(row.temp_c is not None and row.humidity_pct is not None for row in hours.rows)
-    assert len(json.dumps(plain_output(hours))) < 3500
-    auckland = get_hourly(build_output({"city": "Auckland", "date": "2026-09-27"}, HourlyInput), tmp_path)
-    assert [row.time[11:] for row in auckland.rows][:3] == ["00:00+12:00", "01:00+12:00", "03:00+13:00"]
-    with pytest.raises(ValueError, match="unknown city"):
-        get_hourly(build_output({"city": "Nowhere", "date": DATE}, HourlyInput), tmp_path)
+def test_check_date_answers_today_from_the_clock(offline) -> None:
+    answer = plain_output(alerts.check_date(build_output({"date": "today"}, DateInput), Path(".")))
+    assert answer["today"] == answer["date"] == "2026-10-16" and answer["weekday"] == "Friday"
+    assert answer["kind"] == "forecast" and "ECMWF IFS forecast issued 2026-10-15 06:00 UTC" in answer["source"]
+    assert answer["forecast_last"] == "2026-10-29" and answer["outlook_last"] == "2027-04-30"
 
 
-def test_the_local_day_is_not_the_utc_day(tmp_path: Path) -> None:
-    """Santiago's 23-hour local day aggregates differently from the 24 UTC hours of the same date."""
-    rows = []
-    for date in ("2026-09-05", "2026-09-06", "2026-09-07"):
-        for row in get_hourly(build_output({"city": "Santiago", "date": date}, HourlyInput), tmp_path).rows:
-            if datetime.fromisoformat(row.time).astimezone(UTC).strftime("%Y-%m-%d") == DATE:
-                rows.append({"temperature_2m": Decimal(str(row.temp_c)), "relative_humidity_2m": Decimal(str(row.humidity_pct)), "precipitation": Decimal(str(row.rain_mm)), "wind_speed_10m": Decimal(str(row.wind_kmh))})
-    utc_day = aggregate("Santiago", rows)
-    humid = {**ARGUMENTS, "conditions": ["humidity >= 50"]}
-    local = get_daily(daily(["Santiago"], task=humid), tmp_path).cities[0]
-    assert utc_day.hours == 24 and local.hours == 23
-    utc_mean = Fraction(utc_day.humidity_sum_pct) / utc_day.humidity_hours
-    assert Decimal(str(local.values["humidity"])) != truncate(utc_mean) and utc_day.humidity_hours == 24
-
-
-TASK = {"date": DATE, "match": "any", "temperature_unit": "F", "wind_unit": "mph", "rain_unit": "in", "conditions": ["max_temp >= 95", "rain > 0.5"]}
-
-
-def report(examined, alerts=(), unavailable=(), task=TASK):
-    return build_output({"task": task, "examined": list(examined), "alerts": list(alerts), "unavailable": list(unavailable)}, ReportInput)
-
-
-def saved(tmp_path: Path, date: str = DATE) -> dict:
-    return json.loads((tmp_path / "reports" / f"{date}.json").read_text())
-
-
-def returned(out) -> dict:
-    """A ReportOutput's merged report as JSON."""
-    return plain_output(out.report)
-
-
-def test_report_alerts_merges_each_call_by_city_and_returns_the_merged_report(tmp_path: Path) -> None:
-    cairo = {"city": "Cairo", "values": {"max_temp": 98.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}
-    first = report_alerts(report(NAMES[:10], alerts=[cairo]), tmp_path)
-    assert first.path == f"reports/{DATE}.json" and (first.examined, first.complete) == (10, False)
-    assert returned(first) == {"task": TASK, "alerts": [cairo], "unavailable": []}
-    marker = json.loads((tmp_path / "reports" / "run.json").read_text())
-    assert marker["run"] == RUN
-    assert saved(tmp_path) == {"date": DATE, "run": RUN, "task": TASK, "examined": NAMES[:10], "alerts": [cairo], "unavailable": []}
-    lima = {"city": "Lima", "variables": ["rain"]}
-    second = report_alerts(report(NAMES[10:20], unavailable=[lima]), tmp_path)
-    assert (second.examined, second.complete) == (20, False)
-    assert returned(second) == {"task": TASK, "alerts": [cairo], "unavailable": [lima]}
-    # a later call restates the cities it examines: Cairo's values replaced, nothing else touched
-    fixed = {**cairo, "values": {"max_temp": 98.8, "rain": 0.0}}
-    third = report_alerts(report(NAMES[20:30] + ["Cairo"], alerts=[fixed]), tmp_path)
-    assert (third.examined, third.complete) == (30, True)
-    assert returned(third) == {"task": TASK, "alerts": [fixed], "unavailable": [lima]}
-    assert saved(tmp_path) == {"date": DATE, "run": RUN, "task": TASK, "examined": NAMES, "alerts": [fixed], "unavailable": [lima]}
-    # an examined city with no entry has no alert: Cairo's goes; Lima turns from unavailable into an alert
-    lima_alert = {"city": "Lima", "values": {"max_temp": 70.0, "rain": 0.6}, "matched": ["rain > 0.5"]}
-    fourth = report_alerts(report(["Cairo", "Lima"], alerts=[lima_alert]), tmp_path)
-    assert (fourth.examined, fourth.complete) == (30, True)
-    assert returned(fourth) == {"task": TASK, "alerts": [lima_alert], "unavailable": []}
-    assert saved(tmp_path)["alerts"] == [lima_alert] and saved(tmp_path)["unavailable"] == []
-    assert sorted(path.name for path in (tmp_path / "reports").iterdir()) == [f"{DATE}.json", "run.json"]
-
-
-def test_report_alerts_keeps_the_task_as_given_and_merges_under_it_whatever_its_spelling(tmp_path: Path) -> None:
-    spelled = {**TASK, "conditions": ["max_temp>=95.0", "rain > .5"]}
-    cairo = {"city": "Cairo", "values": {"max_temp": 98.0, "rain": 0.0}, "matched": ["max_temp>=95.0"]}
-    first = report_alerts(report(NAMES[:10], alerts=[cairo]), tmp_path)
-    second = report_alerts(report(NAMES[10:30], task=spelled), tmp_path)
-    assert (second.examined, second.complete) == (30, True)
-    assert returned(second) == {"task": spelled, "alerts": [cairo], "unavailable": []}
-    assert saved(tmp_path)["task"] == spelled and returned(first)["task"] == TASK
-
-
-@pytest.mark.parametrize(
-    "leftover",
-    [
-        "not json at all",
-        json.dumps({"date": DATE, "run": "deadbeefdeadbeef", "examined": NAMES, "alerts": [], "unavailable": []}),  # an older version's shape
-        json.dumps({"date": DATE, "run": "deadbeefdeadbeef", "task": TASK, "examined": NAMES, "alerts": [{"city": "Lima", "values": {"max_temp": 1.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}], "unavailable": []}),  # another run's
-        json.dumps({"date": "2026-07-01", "run": RUN, "task": {**TASK, "date": "2026-07-01"}, "examined": NAMES, "alerts": [], "unavailable": []}),  # another date's content
-        json.dumps({"date": DATE, "run": RUN, "task": {**TASK, "match": "all"}, "examined": NAMES, "alerts": [], "unavailable": []}),  # another task's
-    ],
-)
-def test_the_first_call_of_a_run_replaces_a_leftover_file(tmp_path: Path, leftover: str) -> None:
-    (tmp_path / "reports").mkdir()
-    (tmp_path / "reports" / f"{DATE}.json").write_text(leftover)
-    (tmp_path / "reports" / "run.json").write_text(json.dumps({"run": "deadbeefdeadbeef"}))
-    out = report_alerts(report(["Athens"]), tmp_path)
-    assert (out.examined, out.complete) == (1, False)
-    assert returned(out) == {"task": TASK, "alerts": [], "unavailable": []}
-    assert saved(tmp_path) == {"date": DATE, "run": RUN, "task": TASK, "examined": ["Athens"], "alerts": [], "unavailable": []}
-    assert json.loads((tmp_path / "reports" / "run.json").read_text())["run"] == RUN
-
-
-@pytest.mark.parametrize(
-    ("examined", "alerts", "unavailable", "error"),
-    [
-        ([], [], [], "1 to 30"),
-        (NAMES + ["Atlantis"], [], [], "1 to 30"),
-        (["Athens", "Athens"], [], [], "1 to 30"),
-        (["Atlantis"], [], [], "unknown city Atlantis"),
-        (["Athens"], [{"city": "Cairo", "values": {"max_temp": 1.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}], [], "must be listed in examined"),
-        (["Athens", "Cairo"], [{"city": "Cairo", "values": {"max_temp": 1.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}], [{"city": "Cairo", "variables": ["rain"]}], "once"),
-        (["Cairo"], [{"city": "Cairo", "values": {"max_temp": 1.0}, "matched": ["max_temp >= 95"]}], [], "exactly the variables"),
-        (["Cairo"], [{"city": "Cairo", "values": {"max_temp": 1.0, "rain": 0.0}, "matched": ["wind >= 1"]}], [], "does not have"),
-        (["Cairo"], [{"city": "Cairo", "values": {"max_temp": 1.0, "rain": 0.0}, "matched": []}], [], "at least one"),
-        (["Cairo"], [], [{"city": "Cairo", "variables": ["wind"]}], "variables must name"),
-    ],
-)
-def test_report_alerts_refuses_bad_calls(tmp_path: Path, examined, alerts, unavailable, error: str) -> None:
-    with pytest.raises(ValueError, match=error):
-        report_alerts(report(examined, alerts, unavailable), tmp_path)
-    with pytest.raises(ValueError, match="outside the snapshot"):
-        report_alerts(report(["Athens"], task={**TASK, "date": "2027-01-01"}), tmp_path)
-    with pytest.raises(ValueError, match="not a condition"):
-        report_alerts(report(["Athens"], task={**TASK, "conditions": ["hot > 1"]}), tmp_path)
-    assert not (tmp_path / "reports").exists()
-
-
-def test_concurrent_calls_merge_without_losing_entries(tmp_path: Path) -> None:
-    """Several report_alerts calls of one turn run at once: every call's cities land in the file."""
-    chunks = [NAMES[start : start + 5] for start in range(0, 30, 5)]
-    calls = [report(chunk, alerts=[{"city": chunk[0], "values": {"max_temp": 99.0, "rain": 0.0}, "matched": ["max_temp >= 95"]}]) for chunk in chunks]
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        outputs = list(pool.map(lambda call: report_alerts(call, tmp_path), calls))
-    assert all(5 <= out.examined <= 30 and out.complete == (out.examined == 30) for out in outputs)
-    assert all(chunk[0] in {a["city"] for a in returned(out)["alerts"]} for chunk, out in zip(chunks, outputs, strict=True))
-    assert max(out.examined for out in outputs) == 30
-    final = saved(tmp_path)
-    assert final["examined"] == NAMES and sorted(a["city"] for a in final["alerts"]) == sorted(chunk[0] for chunk in chunks)
+def test_every_call_leaves_one_line_in_the_call_log(offline) -> None:
+    run = Run(task_for("2026-07-07"), offline, clock=T0)
+    alerts.log_call(run.workspace, "get_daily", {"task": run.task, "cities": list(CITY_NAMES)}, "ok", 0.5)
+    alerts.log_call(run.workspace, "report_alerts", {"task": run.task, "examined": ["Oslo"], "alerts": [], "unavailable": []}, "error: x", 0.1)
+    lines = [json.loads(line) for line in (run.workspace / "reports" / "calls.log").read_text().splitlines()]
+    assert [line["tool"] for line in lines] == ["get_daily", "report_alerts"]
+    assert lines[0]["cities"] == 30 and lines[1]["examined"] == 1 and lines[1]["result"] == "error: x"

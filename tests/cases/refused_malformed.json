@@ -1,0 +1,21 @@
+{
+ "note": "A malformed date is refused before the agent starts.",
+ "task": "daily-alert",
+ "arguments": {
+  "date": "2026-02-30",
+  "match": "any",
+  "temperature_unit": "F",
+  "wind_unit": "mph",
+  "rain_unit": "in",
+  "conditions": [
+   "max_temp >= 95",
+   "humidity >= 85",
+   "rain > 0.5",
+   "wind >= 20"
+  ]
+ },
+ "steps": [],
+ "expect": {
+  "error_contains": "not a calendar day"
+ }
+}

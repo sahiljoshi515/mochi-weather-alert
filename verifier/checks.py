@@ -1,6 +1,15 @@
-"""Checks shared by the tool verifiers. Pure functions of their arguments and the files on disk."""
+"""Shared verdict helpers: a result, the ordered constraint list every task verdict carries, and plain
+forms of the contract instances the rules work on. Pure functions of their arguments and files."""
 
-from .rules import SOURCE_VARIABLES, date_problem
+import json
+from pathlib import Path
+
+from .rules import SOURCE_VARIABLES, plain_source
+
+# The report and receipt live in the run's folder, which is the member's own folder for this plugin.
+REPORT_DIR = "reports"
+RUN_MARKER = "run.json"
+MOST = 10  # list entries a constraint's expected or actual shows
 
 
 def result(valid, message, *, score=None, **details):
@@ -12,44 +21,88 @@ def result(valid, message, *, score=None, **details):
     }
 
 
-def date_check(date):
-    """A date's problem as a result, or None when it is a snapshot day."""
-    problem = date_problem(date)
-    return result(False, problem) if problem else None
+def compact(value):
+    """A value small enough for a verdict: lists cut to MOST entries."""
+    if isinstance(value, list) and len(value) > MOST:
+        return value[:MOST] + [f"… {len(value) - MOST} more"]
+    return value
 
 
-def names_problem(names, *, what, most=None):
-    """What is wrong with a list of city names, or None: non-empty strings, distinct, at most ``most``."""
-    if not isinstance(names, list) or not all(isinstance(name, str) and name.strip() for name in names):
-        return f"{what} must be a list of city names"
-    if len(set(names)) != len(names):
-        return f"{what} must be distinct"
-    if most is not None and not 1 <= len(names) <= most:
-        return f"{what} must hold 1 to {most} names"
-    return None
+def constraint(identifier, text, ok, expected=None, actual=None, message=None):
+    """One constraint's entry: ok is True (holds), False (fails) or None (not checked: an earlier one it
+    depends on failed). A failed one says why in plain words."""
+    entry = {"id": identifier, "constraint": text, "ok": ok, "expected": compact(expected), "actual": compact(actual)}
+    if ok is False and message:
+        entry["message"] = message
+    return entry
 
 
-def day_problem(row, *, humidity):
-    """What is wrong with one city's day aggregates (a PinnedCity or DailyCity), or None.
-    ``humidity`` is the row's humidity figure to range-check (a mean or a sum), or None."""
-    if not 1 <= row.hours <= 25:
-        return f"{row.city}: a local day has 1 to 25 hours, not {row.hours}"
-    if row.max_temp_c is not None and row.min_temp_c is not None and row.max_temp_c < row.min_temp_c:
-        return f"{row.city}: the highest temperature is below the lowest"
-    if (row.max_temp_c is None) != (row.min_temp_c is None):
-        return f"{row.city}: the highest and lowest temperature must both be present or both missing"
-    if row.rain_mm is not None and row.rain_mm < 0:
-        return f"{row.city}: precipitation is negative"
-    if row.max_wind_kmh is not None and row.max_wind_kmh < 0:
-        return f"{row.city}: wind speed is negative"
-    if humidity is not None and humidity < 0:
-        return f"{row.city}: humidity is negative"
-    unknown = sorted(set(row.missing) - set(SOURCE_VARIABLES))
-    if unknown or len(set(row.missing)) != len(row.missing):
-        return f"{row.city}: missing must name distinct source variables"
-    for variable, value in (("temperature_2m", row.max_temp_c), ("precipitation", row.rain_mm), ("wind_speed_10m", row.max_wind_kmh)):
-        if value is None and variable not in row.missing:
-            return f"{row.city}: {variable} has no value but is not listed as missing"
-    if humidity is None and "relative_humidity_2m" not in row.missing:
-        return f"{row.city}: relative_humidity_2m has no value but is not listed as missing"
-    return None
+def read_json(path):
+    """(the file's JSON, None) or (None, why it cannot be read)."""
+    path = Path(path)
+    if not path.is_file():
+        return None, "missing"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except ValueError:
+        return None, "not JSON"
+
+
+def run_of(workspace):
+    """The run marker the plugin process wrote at its start (reports/run.json), or None."""
+    found, problem = read_json(Path(workspace) / REPORT_DIR / RUN_MARKER)
+    run = found.get("run") if isinstance(found, dict) and not problem else None
+    return run if isinstance(run, str) and run.strip() else None
+
+
+def plain_city(city):
+    """A contract PinnedCity as the plain series the rules read."""
+    return {
+        "city": city.city,
+        "timezone": city.timezone,
+        "start": city.start,
+        "end": city.end,
+        "start_offset": city.start_offset,
+        "end_offset": city.end_offset,
+        "grid": list(city.grid),
+        "times": list(city.times),
+        **{variable: list(readings_of(city, variable)) for variable in SOURCE_VARIABLES},
+    }
+
+
+def readings_of(city, variable):
+    """A PinnedCity's readings of one source variable."""
+    if variable == "temperature_2m":
+        return city.temperature_2m
+    if variable == "relative_humidity_2m":
+        return city.relative_humidity_2m
+    if variable == "precipitation":
+        return city.precipitation
+    return city.wind_speed_10m
+
+
+def plain_candidate(candidate):
+    """A contract PinnedSource as plain JSON."""
+    return {
+        "source": plain_source(candidate.source),
+        "clock": candidate.clock,
+        "fetched_at": candidate.fetched_at,
+        "request": candidate.request,
+        "skipped": list(candidate.skipped),
+        "sha256": candidate.sha256,
+        "cities": [plain_city(city) for city in candidate.cities],
+        "alerts": [{"city": a.city, "values": dict(a.values), "matched": list(a.matched)} for a in candidate.alerts],
+        "unavailable": [{"city": u.city, "variables": list(u.variables)} for u in candidate.unavailable],
+    }
+
+
+def entries_of(value):
+    """The alerts and unavailable cities of a contract ReportInput or AlertReportOutput, as JSON."""
+    return {
+        "alerts": [{"city": a.city, "values": dict(a.values), "matched": list(a.matched)} for a in value.alerts],
+        "unavailable": [{"city": u.city, "variables": list(u.variables)} for u in value.unavailable],
+    }
+
+
+def entries_by_city(judgement):
+    return {entry["city"]: entry for entry in judgement["alerts"]}, {entry["city"]: entry for entry in judgement["unavailable"]}

@@ -14,7 +14,7 @@ from mcp.server.stdio import stdio_server
 from slimconfig import build_output, output_schema, plain_output
 
 from contract import TOOLS, Tool
-from plugin import get_daily, get_hourly, list_cities, log_call, pin_alerts, report_alerts, write_run_marker
+from plugin import check_date, get_daily, log_call, pin_alerts, report_alerts, write_run_marker
 
 server = Server("weather-alert")
 # NanoAgent names the one folder this plugin may write to.
@@ -22,10 +22,9 @@ WORKSPACE_ENV = "NANOAGENT_WORKSPACE"
 # Each tool's implementation: (its input, the workspace) -> its output, as contract.TOOLS types them.
 IMPLEMENTATIONS = {
     Tool.PIN_ALERTS: pin_alerts,
-    Tool.LIST_CITIES: list_cities,
     Tool.GET_DAILY: get_daily,
-    Tool.GET_HOURLY: get_hourly,
     Tool.REPORT_ALERTS: report_alerts,
+    Tool.CHECK_DATE: check_date,
 }
 
 
@@ -60,7 +59,7 @@ def main() -> None:
         raise SystemExit(f"{WORKSPACE_ENV} is not set: NanoAgent passes the plugin's workspace folder")
     if set(IMPLEMENTATIONS) != set(Tool):
         raise SystemExit("IMPLEMENTATIONS must implement every contract.Tool")
-    # This run's marker: a report file left in the workspace by an earlier run is never taken for this run's.
+    # This run's marker: a report or receipt left in the workspace by an earlier run is never taken for this run's.
     write_run_marker(Path(os.environ[WORKSPACE_ENV]))
 
     async def run() -> None:

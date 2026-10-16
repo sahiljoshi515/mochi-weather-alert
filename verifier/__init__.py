@@ -2,17 +2,16 @@
 
 from contract import Task, Tool
 
-from . import cities, daily, hourly, pin, report
+from . import daily, dates, pin, report, task
 
 TOOLS = {
     Tool.PIN_ALERTS: pin,
-    Tool.LIST_CITIES: cities,
     Tool.GET_DAILY: daily,
-    Tool.GET_HOURLY: hourly,
     Tool.REPORT_ALERTS: report,
+    Tool.CHECK_DATE: dates,
 }
-# task -> its output's check, verify_task(arguments, output, reference, workspace)
-TASKS = {Task.DAILY_ALERT: pin.verify_task}
+# task -> its verdict, verify_task(arguments, output, reference, workspace)
+TASKS = {Task.DAILY_ALERT: task.verify_task, Task.CHECK_DATE: dates.verify_task}
 
 
 def verify_input(tool, value):

@@ -9,14 +9,14 @@ from slimconfig import Output
 
 class Tool(Enum):
     PIN_ALERTS = "pin_alerts"
-    LIST_CITIES = "list_cities"
     GET_DAILY = "get_daily"
-    GET_HOURLY = "get_hourly"
     REPORT_ALERTS = "report_alerts"
+    CHECK_DATE = "check_date"
 
 
 class Task(Enum):
     DAILY_ALERT = "daily-alert"
+    CHECK_DATE = "check-date"
 
 
 class Match(Enum):
@@ -40,16 +40,29 @@ class RainUnit(Enum):
     IN = "in"
 
 
-DATE = "A local calendar day in the snapshot, YYYY-MM-DD, from 2026-07-01 to 2026-09-30"
+class DataKind(Enum):
+    ARCHIVE = "archive"
+    FORECAST = "forecast"
+    OUTLOOK = "outlook"
+
+
+DATE = (
+    "A calendar day YYYY-MM-DD from 1940-01-01 to about six months ahead: the past from the archive, the next two "
+    "weeks from a forecast run, later days from the seasonal outlook. Out-of-range dates are refused with today's "
+    "UTC date and the allowed ranges. You are not told today's date: for a day relative to today, call check-date first"
+)
 CITY = "A city's name as the task names it, e.g. Santiago"
 CONDITION = (
     'A rule "<variable> <op> <number>": variable max_temp, min_temp, rain, wind or humidity; op >=, >, <= or <; '
     'the number in the requested units (humidity in %), with at most 2 decimals; e.g. "max_temp >= 95"'
 )
-HOURS = "Hourly rows in the local calendar day: 23 on a day clocks go forward, 25 when they go back, else 24"
+SAMPLES = (
+    "Readings at an instant inside the local day: 23 to 25 hourly ones (23 when clocks go forward, 25 when they go "
+    "back), or 3 to 5 six-hourly ones for the seasonal outlook"
+)
 MISSING = (
-    "Source variables with at least one missing hour that day: temperature_2m, relative_humidity_2m, "
-    "precipitation or wind_speed_10m"
+    "Source variables with a reading missing that day: temperature_2m, relative_humidity_2m, precipitation or "
+    "wind_speed_10m"
 )
 TASK = "The task input, exactly as given"
 
@@ -65,17 +78,29 @@ class AlertInput(Output):
 
 
 @dataclass
+class DataSource(Output):
+    kind: Annotated[DataKind, "archive (the past), forecast (yesterday to two weeks ahead) or outlook (later)"]
+    model: Annotated[str, "The Open-Meteo model: era5, ecmwf_ifs or ecmwf_seas5_ensemble_mean"]
+    run: Annotated[str, "A forecast's run, YYYY-MM-DDTHH:MM UTC; empty for the archive and the outlook"]
+    step_hours: Annotated[int, "Hours between readings: 1, or 6 for the outlook"]
+    today: Annotated[str, "Today's UTC date when the data was chosen"]
+    label: Annotated[str, "The data in plain words, e.g. ECMWF IFS forecast issued 2026-10-16 00:00 UTC, hourly"]
+
+
+@dataclass
 class PinnedCity(Output):
     city: str
-    country: str
-    hours: Annotated[int, HOURS]
-    max_temp_c: Annotated[float | None, "The day's highest hourly temperature, °C; null when no hour has one"]
-    min_temp_c: Annotated[float | None, "The day's lowest hourly temperature, °C; null when no hour has one"]
-    rain_mm: Annotated[float | None, "The precipitation total over the hours that have one, mm; null when none has"]
-    max_wind_kmh: Annotated[float | None, "The day's highest hourly wind speed, km/h; null when no hour has one"]
-    humidity_sum_pct: Annotated[float | None, "The sum of the hourly relative humidities present, %; null when none is"]
-    humidity_hours: Annotated[int, "How many hours have a relative humidity"]
-    missing: Annotated[list[str], MISSING]
+    timezone: Annotated[str, "The city's IANA time zone"]
+    start: Annotated[str, "The local day's first instant, a UTC time YYYY-MM-DDTHH:MM"]
+    end: Annotated[str, "The next local day's first instant, a UTC time YYYY-MM-DDTHH:MM"]
+    start_offset: Annotated[int, "Minutes east of UTC at start"]
+    end_offset: Annotated[int, "Minutes east of UTC at end"]
+    grid: Annotated[list[float], "Open-Meteo's grid point: latitude, longitude and elevation"]
+    times: Annotated[list[str], "The source's stamps from start to end, UTC"]
+    temperature_2m: Annotated[list[float | None], "°C at each stamp; null where missing"]
+    relative_humidity_2m: Annotated[list[float | None], "% at each stamp; null where missing"]
+    precipitation: Annotated[list[float | None], "mm over the step ending at each stamp; null where missing"]
+    wind_speed_10m: Annotated[list[float | None], "km/h at each stamp; null where missing"]
 
 
 @dataclass
@@ -91,41 +116,35 @@ class Alert(Output):
 @dataclass
 class Unavailable(Output):
     city: Annotated[str, CITY]
-    variables: Annotated[list[str], "The condition variables the city has a missing hour for"]
+    variables: Annotated[list[str], "The condition variables the city has a missing reading for"]
+
+
+@dataclass
+class PinnedSource(Output):
+    source: DataSource
+    clock: Annotated[str, "The clock reading the date rules were applied at, a UTC time YYYY-MM-DDTHH:MM"]
+    fetched_at: Annotated[str, "When Open-Meteo answered, UTC"]
+    request: Annotated[str, "The request that fetched the data"]
+    skipped: Annotated[list[str], "Newer forecast runs not (completely) published when fetched, newest first"]
+    sha256: Annotated[str, "sha256 of the data's canonical form"]
+    cities: Annotated[list[PinnedCity], "Every city's local day"]
+    alerts: Annotated[list[Alert], "The cities whose day satisfies the rules on this data"]
+    unavailable: Annotated[list[Unavailable], "The cities with a missing reading for a variable the conditions use"]
 
 
 @dataclass
 class PinOutput(Output):
     date: str
-    metric: Annotated[list[PinnedCity], "Every city's local day, in metric units"]
-    alerts: Annotated[list[Alert], "The cities whose day satisfies the rules"]
-    unavailable: Annotated[list[Unavailable], "The cities with a missing hour for a variable the conditions use"]
+    clock: Annotated[str, "The answer key's clock reading, a UTC time YYYY-MM-DDTHH:MM"]
+    candidates: Annotated[list[PinnedSource], "The data the rules choose at the clock and 10 minutes before it: one source, or two"]
 
 
 @dataclass
 class AlertReportOutput(Output):
     task: Annotated[AlertInput, TASK]
+    data: Annotated[DataSource, "The data the report judges, as report_alerts returned it"]
     alerts: Annotated[list[Alert], "Every city whose day satisfies the rules, with its values and matched conditions; [] for none"]
-    unavailable: Annotated[list[Unavailable], "Every city with a missing hour for a variable the conditions use; [] for none"]
-
-
-@dataclass
-class CitiesInput(Output):
-    date: Annotated[str, DATE]
-
-
-@dataclass
-class CityDay(Output):
-    city: str
-    country: str
-    timezone: Annotated[str, "The city's IANA time zone; its day is the calendar day there"]
-    hours_available: Annotated[int, HOURS]
-
-
-@dataclass
-class CitiesOutput(Output):
-    date: str
-    cities: list[CityDay]
+    unavailable: Annotated[list[Unavailable], "Every city with a missing reading for a variable the conditions use; [] for none"]
 
 
 @dataclass
@@ -137,11 +156,11 @@ class DailyInput(Output):
 @dataclass
 class DailyCity(Output):
     city: str
-    hours: Annotated[int, HOURS]
+    samples: Annotated[int, SAMPLES]
     missing: Annotated[list[str], MISSING]
     values: Annotated[
         dict[str, float],
-        "Each variable the task's conditions use that the day has every hour of, in the task's units, exact to 9 "
+        "Each variable the task's conditions use that the day has every reading of, in the task's units, exact to 9 "
         "decimals (truncated, never rounded): compare the conditions against these as they are, and report each "
         'one rounded half up to 1 decimal, e.g. {"max_temp": 96.26, "wind": 24.979121927}',
     ]
@@ -150,30 +169,8 @@ class DailyCity(Output):
 @dataclass
 class DailyOutput(Output):
     date: str
+    source: Annotated[DataSource, "The data the values come from"]
     cities: list[DailyCity]
-
-
-@dataclass
-class HourlyInput(Output):
-    city: Annotated[str, CITY]
-    date: Annotated[str, DATE]
-
-
-@dataclass
-class HourlyRow(Output):
-    time: Annotated[str, "Local time with its UTC offset, e.g. 2026-09-06T01:00-03:00"]
-    temp_c: Annotated[float | None, "Temperature, °C"]
-    humidity_pct: Annotated[float | None, "Relative humidity, %"]
-    rain_mm: Annotated[float | None, "Precipitation in the hour, mm"]
-    wind_kmh: Annotated[float | None, "Wind speed, km/h"]
-
-
-@dataclass
-class HourlyOutput(Output):
-    city: str
-    date: str
-    timezone: str
-    rows: list[HourlyRow]
 
 
 @dataclass
@@ -186,7 +183,7 @@ class ReportInput(Output):
     ]
     alerts: Annotated[list[Alert], "Every examined city whose day satisfies the rules; [] for none"]
     unavailable: Annotated[
-        list[Unavailable], "Every examined city with a missing hour for a variable the conditions use; [] for none"
+        list[Unavailable], "Every examined city with a missing reading for a variable the conditions use; [] for none"
     ]
 
 
@@ -195,14 +192,38 @@ class ReportOutput(Output):
     path: Annotated[str, "The report file, relative to the workspace: reports/<date>.json"]
     examined: Annotated[int, "How many of the 30 cities the merged report has examined so far"]
     complete: Annotated[bool, "Whether every city is examined: then submit the report"]
-    report: Annotated[AlertReportOutput, "The merged report so far: the task, every alert and every unavailable city"]
+    report: Annotated[AlertReportOutput, "The merged report so far: the task, its data, every alert and every unavailable city"]
+
+
+@dataclass
+class DateInput(Output):
+    date: Annotated[str, "A date YYYY-MM-DD, or today"]
+
+
+@dataclass
+class DateOutput(Output):
+    today: Annotated[str, "Today's date in UTC"]
+    clock: Annotated[str, "The clock reading, a UTC time YYYY-MM-DDTHH:MM"]
+    date: Annotated[str, "The date asked about (today's when the input is today)"]
+    weekday: Annotated[str, "The date's weekday"]
+    kind: Annotated[DataKind | None, "The data a daily-alert task on the date would use; null when the date is refused"]
+    source: Annotated[str, "That data in plain words, or why the date is refused"]
+    archive_first: Annotated[str, "The first date the archive covers"]
+    archive_last: Annotated[str, "The last date the archive covers"]
+    forecast_first: Annotated[str, "The first date a forecast run covers"]
+    forecast_last: Annotated[str, "The last date a forecast run covers"]
+    outlook_first: Annotated[str, "The first date the seasonal outlook covers"]
+    outlook_last: Annotated[str, "The last date the seasonal outlook covers"]
+    message: Annotated[str, "The answer in one sentence"]
 
 
 TOOLS = {
     Tool.PIN_ALERTS: (AlertInput, PinOutput),
-    Tool.LIST_CITIES: (CitiesInput, CitiesOutput),
     Tool.GET_DAILY: (DailyInput, DailyOutput),
-    Tool.GET_HOURLY: (HourlyInput, HourlyOutput),
     Tool.REPORT_ALERTS: (ReportInput, ReportOutput),
+    Tool.CHECK_DATE: (DateInput, DateOutput),
 }
-TASKS = {Task.DAILY_ALERT: (AlertInput, AlertReportOutput)}
+TASKS = {
+    Task.DAILY_ALERT: (AlertInput, AlertReportOutput),
+    Task.CHECK_DATE: (DateInput, DateOutput),
+}

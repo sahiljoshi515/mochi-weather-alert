@@ -1,7 +1,8 @@
-// How this plugin's page draws the daily-alert task's output, an AlertReportOutput: the rules the
-// person asked for, then one row per alert city with its values in the requested units and the
-// rules it met, and the cities whose day had a missing hour for a needed variable.
-import { dataTable, h, icon, plural } from "./kit/components.js";
+// How this plugin's page draws its tasks' outputs: the daily-alert report (an AlertReportOutput) with
+// the rules asked for, one row per alert city with its values in the requested units and the rules it
+// met, the cities with a missing reading, the data the values come from, and the verdict's checks; and
+// the date check (a DateOutput) with each kind of data's date range.
+import { dataTable, disclosure, h, icon, plural, statusPill } from "./kit/components.js";
 
 const VARIABLES = ["max_temp", "min_temp", "rain", "wind", "humidity"];
 const LABEL = { max_temp: "High", min_temp: "Low", rain: "Rain", wind: "Wind", humidity: "Humidity" };
@@ -9,6 +10,7 @@ const UNIT = { C: "°C", F: "°F", kmh: "km/h", mph: "mph", ms: "m/s", mm: "mm",
 const OP = { ">=": "≥", "<=": "≤", ">": ">", "<": "<" };
 const CONDITION = /^\s*(max_temp|min_temp|rain|wind|humidity)\s*(>=|<=|>|<)\s*(\S+)\s*$/;
 const DAY = new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+const KIND = { archive: "Archive", forecast: "Forecast run", outlook: "Seasonal outlook" };
 
 /** The unit a variable's values carry under the task's choices. */
 function unitOf(task, variable) {
@@ -73,11 +75,11 @@ function alertsTable(task, alerts) {
   return dataTable({ caption: "Alert cities", columns, rows: alerts, limit: 30, empty: "No city crossed the thresholds." }).element;
 }
 
-function unavailableList(task, unavailable) {
+function unavailableList(unavailable) {
   return h(
     "div",
     { class: "alert-unavailable" },
-    h("p", { class: "small-text" }, icon("alert", { size: 14 }), ` ${plural(unavailable.length, "city", "cities")} with a missing hour, never an alert:`),
+    h("p", { class: "small-text" }, icon("alert", { size: 14 }), ` ${plural(unavailable.length, "city", "cities")} missing a reading, never an alert:`),
     h(
       "ul",
       { class: "alert-unavailable-list" },
@@ -86,19 +88,88 @@ function unavailableList(task, unavailable) {
   );
 }
 
-export default {
-  AlertReportOutput: ({ task, alerts, unavailable }) =>
+/** Where the values come from, with Open-Meteo's attribution. */
+function sourceLine(data) {
+  if (!data || !data.label) return null;
+  return h(
+    "p",
+    { class: "alert-source small-text" },
+    icon("info", { size: 14 }),
+    ` Data: ${data.label}. `,
+    h("a", { href: "https://open-meteo.com", target: "_blank", rel: "noopener noreferrer", text: "Weather data by Open-Meteo.com" }),
+    " (CC BY 4.0)",
+  );
+}
+
+/** The verdict's checks, each with whether it holds and, when it fails, why. */
+function checksList(verdict) {
+  const constraints = verdict && verdict.details && Array.isArray(verdict.details.constraints) ? verdict.details.constraints : [];
+  if (!constraints.length) return null;
+  const failed = constraints.filter((entry) => entry.ok === false).length;
+  const held = constraints.filter((entry) => entry.ok === true).length;
+  const items = constraints.map((entry) => {
+    const state = entry.ok === true ? "ok" : entry.ok === false ? "bad" : "skip";
+    const mark = entry.ok === true ? "check" : entry.ok === false ? "error" : "minus";
+    const word = entry.ok === true ? "holds" : entry.ok === false ? "fails" : "not checked";
+    return h(
+      "li",
+      { class: `check check-${state}` },
+      icon(mark, { size: 14, label: word }),
+      h("span", { text: ` ${entry.constraint}` }),
+      entry.ok === false && entry.message ? h("p", { class: "check-message small-text", text: entry.message }) : null,
+    );
+  });
+  return disclosure(
+    { summary: `Checks: ${held} of ${constraints.length} hold`, open: failed > 0, hint: failed ? plural(failed, "failed", "failed") : "all hold" },
+    h("ol", { class: "checks" }, items),
+  );
+}
+
+function alertReport({ task, data, alerts, unavailable }, { verdict } = {}) {
+  return h(
+    "div",
+    { class: "alert-report" },
     h(
-      "div",
-      { class: "alert-report" },
-      h(
-        "p",
-        { class: "alert-summary" },
-        icon(alerts.length ? "alert" : "check", { size: 16 }),
-        alerts.length ? ` ${plural(alerts.length, "city", "cities")} crossed the thresholds on ${dayText(task.date)}` : ` No city crossed the thresholds on ${dayText(task.date)}`,
-      ),
-      rulesLine(task),
-      alerts.length ? alertsTable(task, alerts) : null,
-      unavailable.length ? unavailableList(task, unavailable) : null,
+      "p",
+      { class: "alert-summary" },
+      icon(alerts.length ? "alert" : "check", { size: 16 }),
+      alerts.length ? ` ${plural(alerts.length, "city", "cities")} crossed the thresholds on ${dayText(task.date)}` : ` No city crossed the thresholds on ${dayText(task.date)}`,
     ),
+    rulesLine(task),
+    sourceLine(data),
+    alerts.length ? alertsTable(task, alerts) : null,
+    unavailable.length ? unavailableList(unavailable) : null,
+    checksList(verdict),
+  );
+}
+
+function dateCheck(answer) {
+  const ranges = [
+    ["archive", answer.archive_first, answer.archive_last],
+    ["forecast", answer.forecast_first, answer.forecast_last],
+    ["outlook", answer.outlook_first, answer.outlook_last],
+  ];
+  return h(
+    "div",
+    { class: "date-check" },
+    h("p", { class: "alert-summary" }, icon("calendar", { size: 16 }), ` ${answer.message}`),
+    h(
+      "dl",
+      { class: "date-ranges" },
+      ranges.map(([kind, first, last]) =>
+        h(
+          "div",
+          { class: kind === answer.kind ? "date-range chosen" : "date-range" },
+          h("dt", {}, KIND[kind], kind === answer.kind ? statusPill(dayText(answer.date), "info") : null),
+          h("dd", { text: `${first} to ${last}` }),
+        ),
+      ),
+    ),
+    h("p", { class: "muted small-text", text: `Clock ${answer.clock} UTC; today is ${answer.today}.` }),
+  );
+}
+
+export default {
+  AlertReportOutput: (value, context) => alertReport(value, context),
+  DateOutput: (value) => dateCheck(value),
 };

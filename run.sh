@@ -15,8 +15,3 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < .env
 
 uv lock --check --offline --quiet || { echo "uv.lock is out of date with pyproject.toml" >&2; exit 1; }
-
-# Weather Alert's own checks: the pinned snapshot the tools read must be in place.
-for file in src/plugin/data/cities.json src/plugin/data/hourly.csv.gz src/plugin/data/provenance.json; do
-    [[ -f "$file" ]] || { echo "the snapshot file $file is missing" >&2; exit 1; }
-done

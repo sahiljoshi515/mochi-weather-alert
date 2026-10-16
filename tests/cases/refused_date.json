@@ -1,0 +1,21 @@
+{
+ "note": "A date past the seasonal outlook is refused before the agent starts.",
+ "task": "daily-alert",
+ "arguments": {
+  "date": "2031-01-01",
+  "match": "any",
+  "temperature_unit": "F",
+  "wind_unit": "mph",
+  "rain_unit": "in",
+  "conditions": [
+   "max_temp >= 95",
+   "humidity >= 85",
+   "rain > 0.5",
+   "wind >= 20"
+  ]
+ },
+ "steps": [],
+ "expect": {
+  "error_contains": "the last day the ECMWF seasonal outlook covers"
+ }
+}

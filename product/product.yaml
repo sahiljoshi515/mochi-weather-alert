@@ -1,12 +1,12 @@
 _ > nanoagent.plugin.manifest.ProductConfig:
-tagline: "Find the cities whose day crossed your weather thresholds, checked against the data"
-summary: "Name a day and a few threshold rules, such as a high above 95 °F or more than half an inch of rain, in the units you prefer. The agent reads a pinned archive of hourly weather for 30 world cities, already in your units and exact to nine decimals, applies the rules to each city's local day, rounds every value half up, and submits the cities that qualify. Every value in the list is recomputed from the same data and must match to the decimal."
+tagline: "Find the cities whose day crosses your weather thresholds, on any date, checked against live data"
+summary: "Name any day from 1940 to about six months ahead and a few threshold rules, such as a high above 95 °F or more than half an inch of rain, in the units you prefer. The agent reads 30 world cities' local days from Open-Meteo: the ECMWF archive for the past, a published ECMWF forecast run for the next two weeks, and the seasonal outlook after that. It applies the rules, rounds every value half up, and submits the cities that qualify. The check pins the very data the agent read and recomputes every alert from it, constraint by constraint."
 highlights:
-  - "30 cities across every climate, from Reykjavik to Singapore, for July to September 2026"
+  - "Any date from 1940 to about six months ahead, each judged on named Open-Meteo data: ERA5, the IFS archive, one IFS forecast run, or the SEAS5 outlook"
+  - "30 cities across every climate, each on its real local day, 23 or 25 hours when the clocks change"
   - "Your units: °C or °F, km/h, mph or m/s, mm or inches, with exact conversion and half-up rounding"
-  - "Each city's real local day, 23 hours when clocks spring forward"
-  - "The list is checked city by city, value by value, against the pinned data"
+  - "21 checks, each shown with what was expected and found; one failing fails the run"
 steps:
-  - "Ask for a day in July to September 2026, your units, and one to six rules such as a high of at least 95 °F or more than half an inch of rain"
+  - "Ask for a day, your units, and one to six rules such as a high of at least 95 °F or more than half an inch of rain; for a day like tomorrow, the chat first checks today's date"
   - "The agent reads every city's day in one call, judges the cities fifteen at a time, and submits the merged report"
-  - "See the cities that qualify, with their exact values and the rules they met, and the check's verdict"
+  - "See the cities that qualify, with their exact values, the rules they met, the data they come from, and every check of the verdict"

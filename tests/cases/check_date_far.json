@@ -1,0 +1,12 @@
+{
+ "note": "A date past the outlook: answered, not refused.",
+ "task": "check-date",
+ "arguments": {
+  "date": "2031-01-01"
+ },
+ "steps": [],
+ "expect": {
+  "valid": true,
+  "score_min": 1.0
+ }
+}
