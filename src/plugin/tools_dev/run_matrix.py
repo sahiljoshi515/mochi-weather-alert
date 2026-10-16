@@ -18,14 +18,14 @@ import json
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT), str(ROOT / "src"), str(ROOT / "tests")]
 
-from plugin.rules import date_text, day_number, outlook_last_day  # noqa: E402
-from plugin.tools_dev.build_cases import run_case, task  # noqa: E402
+from plugin.rules import date_text, day_number, outlook_last_day
+from plugin.tools_dev.build_cases import run_case, task
 
 HOME = Path.home()
 WRONG = {"valid": False, "score_max": 0.99}
